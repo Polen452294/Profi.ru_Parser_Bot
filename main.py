@@ -66,7 +66,6 @@ def main():
                             save_seen_ids(s.seen_ids_path, seen_ids)
 
                             log.info("NEW orders found: %d", len(new_orders))
-                            # логируем каждую карточку как JSON одной строкой
                             for o in new_orders:
                                 log_json(log, "NEW_ORDER", o)
 

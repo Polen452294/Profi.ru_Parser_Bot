@@ -30,7 +30,7 @@ def read_new_orders():
 
     size = os.path.getsize(ORDERS_FILE)
     if size < offset:
-        offset = 0  # файл пересоздали
+        offset = 0
 
     new_items = []
     with open(ORDERS_FILE, "r", encoding="utf-8") as f:

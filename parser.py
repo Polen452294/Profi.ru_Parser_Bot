@@ -27,21 +27,19 @@ def parse_order_snippet(card_locator) -> dict:
     title = card_locator.get_attribute("aria-label") or get_text(card_locator.locator("h3"))
     href = card_locator.get_attribute("href")
 
-    # Цена: берём из aria-hidden=true (там чисто, без "false")
+    # Цена
     price = get_text(card_locator.locator('span[aria-hidden="true"]'))
 
-    # Описание (длинный текст)
+    # Описание
     description = get_text(card_locator.locator("p"))
 
-    # Локация и удобное время — по aria-label (стабильнее чем sc-классы)
+    # Локация и удобное время — по aria-label
     location = get_text(card_locator.locator('li[aria-label^="Дистанционно"]'))
     preferred_time = get_text(card_locator.locator('li[aria-label^="Удобное время"]'))
 
-    # “10 часов назад” — по тексту
+    # какое то время назад 
     posted_ago = get_text(card_locator.locator('span:has-text("назад")').first)
 
-    # Имя клиента: в твоём HTML это "Александр".
-    # Делается как “лучший-effort”: берём первый span внутри блока с иконкой пользователя.
     client_name = get_text(card_locator.locator('div:has(svg) span').nth(0))
 
     return {

@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.log import logger
 import os
 from dotenv import load_dotenv
 from aiogram import Bot
@@ -37,7 +38,13 @@ async def main():
 
                 for order in orders:
                     log_json(log, "SEND_ORDER", order)
-                    text = format_order(order)
+                    if not order_matches_filter(order):
+                        logger.info(
+                            f"Order {order.get('order_id')} skipped by filter"
+                        )
+                        continue
+
+                    text = order_matches_filter(order)
                     await bot.send_message(
                         ADMIN_CHAT_ID,
                         text,
@@ -54,6 +61,19 @@ async def main():
     except KeyboardInterrupt:
         log.info("Bot stopped by user.")
 
+def order_matches_filter(order: dict) -> bool:
+    keywords = ("бот",)
+
+    text_parts = [
+        order.get("title", ""),
+        order.get("description", ""),
+        order.get("client_name", ""),
+        order.get("location", ""),
+    ]
+
+    full_text = " ".join(text_parts).lower()
+
+    return any(keyword in full_text for keyword in keywords)
 
 if __name__ == "__main__":
     asyncio.run(main())

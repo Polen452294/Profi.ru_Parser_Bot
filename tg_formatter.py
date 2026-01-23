@@ -1,15 +1,17 @@
 import html
-
+import re
 
 def h(x):
     return html.escape(str(x)) if x else ""
 
+def add_space_after_do(text: str) -> str:
+    return re.sub(r'до(?!\s)', 'до ', text)
 
 def format_order(o: dict) -> str:
     lines = [f"🧾 <b>Название:</b> {h(o['title'])}"]
 
     if o.get("price"):
-        lines.append(f"💰 <b>Бюджет:</b> {h(o['price'])}")
+        lines.append(add_space_after_do(f"💰 <b>Бюджет:</b> {h(o['price'])}"))
     if o.get("description"):
         text = o["description"]
         if len(text) > 3000:

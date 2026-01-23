@@ -29,7 +29,7 @@ CURRENT_PARSER_PROC: Process | None = None
 async def start_parser_process(log) -> Process:
     python_exe = sys.executable
 
-    # ✅ важное: заставляем подпроцесс печатать в UTF-8 (Windows)
+    # заставляем подпроцесс печатать в UTF-8 
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
@@ -84,14 +84,13 @@ async def telegram_notifier(log):
                 await asyncio.sleep(BOT_POLL_SEC)
 
             except asyncio.CancelledError:
-                # нормальная отмена при Ctrl+C
                 raise
             except Exception:
                 log.exception("Telegram notifier error")
                 await asyncio.sleep(5)
 
     finally:
-        # ✅ закрываем aiohttp-сессию, иначе будет "Unclosed client session"
+        # закрываем aiohttp-сессию, иначе будет "Unclosed client session"
         await bot.session.close()
         log.info("Telegram notifier stopped.")
 
@@ -110,7 +109,6 @@ async def supervise_parser(runlog):
             try:
                 rc = await proc.wait()
             except asyncio.CancelledError:
-                # отмена при Ctrl+C — выходим, но сначала остановим подпроцесс
                 raise
             finally:
                 # дочитываем вывод, если успеваем

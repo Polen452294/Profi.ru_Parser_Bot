@@ -5,10 +5,6 @@ from config import Settings
 
 
 def ensure_auth_state(p: Playwright, s: Settings) -> None:
-    """
-    Если state_path не существует — откроем браузер и попросим залогиниться вручную.
-    Затем сохраним cookies/storage в storage_state.json.
-    """
     if os.path.exists(s.state_path):
         return
 
