@@ -4,15 +4,16 @@ import os
 from dotenv import load_dotenv
 from aiogram import Bot
 from aiogram.enums import ParseMode
-
 import re
 
+from filters import order_matches_filter
 from tg_watcher import read_new_orders
 from tg_formatter import format_order
 from logger_setup import setup_logger, log_json
 
 load_dotenv()
 
+BOT_RE = re.compile(r"\bбот\w*", re.IGNORECASE)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 POLL_SEC = 3
@@ -41,9 +42,7 @@ async def main():
                 for order in orders:
                     log_json(log, "SEND_ORDER", order)
                     if not order_matches_filter(order):
-                        logger.info(
-                            f"Order {order.get('order_id')} skipped by filter"
-                        )
+                        logger.info("SKIP by filter: %s | %s", order.get("title"), order.get("order_id"))
                         continue
 
                     text = order_matches_filter(order)
@@ -62,20 +61,6 @@ async def main():
 
     except KeyboardInterrupt:
         log.info("Bot stopped by user.")
-
-def order_matches_filter(order: dict) -> bool:
-    keywords = ("бот",)
-
-    text_parts = [
-        order.get("title", ""),
-        order.get("description", ""),
-        order.get("client_name", ""),
-        order.get("location", ""),
-    ]
-
-    full_text = " ".join(text_parts).lower()
-
-    return bool(re.search(r"\bбот\w*", full_text))
 
 if __name__ == "__main__":
     asyncio.run(main())
