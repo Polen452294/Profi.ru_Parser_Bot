@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from aiogram import Bot
 from aiogram.enums import ParseMode
 
+import re
+
 from tg_watcher import read_new_orders
 from tg_formatter import format_order
 from logger_setup import setup_logger, log_json
@@ -73,7 +75,7 @@ def order_matches_filter(order: dict) -> bool:
 
     full_text = " ".join(text_parts).lower()
 
-    return any(keyword in full_text for keyword in keywords)
+    return bool(re.search(r"\bбот\w*", full_text))
 
 if __name__ == "__main__":
     asyncio.run(main())
