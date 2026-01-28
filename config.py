@@ -1,10 +1,15 @@
 from dataclasses import dataclass
 
+bot_cursor_path: str = "bot_cursor.json"
+
 @dataclass(frozen=True)
 class Settings:
     page_url: str = "https://profi.ru/backoffice/"
     state_path: str = "storage_state.json"
-    headless: bool = True
+    auth_state_path: str = "storage_state.json"
+    out_jsonl_path: str = "new_orders.jsonl"
+
+    headless: bool = False
     selector_timeout_ms: int = 60_000
     card_selector: str = 'a[data-testid$="_order-snippet"]'
 

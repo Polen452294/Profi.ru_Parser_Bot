@@ -17,11 +17,6 @@ def save_seen_ids(path: str, ids: set[str]) -> None:
         json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
 
 
-def append_jsonl(path: str, rows: Iterable[dict]) -> None:
-    """
-    Добавляем новые заказы построчно в формате JSONL:
-    1 строка = 1 заказ.
-    """
+def append_jsonl(path: str, obj: dict):
     with open(path, "a", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")

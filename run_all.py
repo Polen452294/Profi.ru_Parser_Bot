@@ -1,12 +1,16 @@
 import asyncio
 import os
 import sys
+import json
+from pathlib import Path
+from typing import Any, Dict, List
 from asyncio.subprocess import Process
 
 from dotenv import load_dotenv
 from aiogram import Bot
 from aiogram.enums import ParseMode
 
+from config import Settings
 from tg_watcher import read_new_orders
 from tg_formatter import format_order
 from logger_setup import setup_logger, log_json
@@ -61,6 +65,7 @@ async def telegram_notifier(log):
     if not BOT_TOKEN:
         log.error("BOT_TOKEN is missing in .env")
         return
+
     if ADMIN_CHAT_ID == 0:
         log.error("ADMIN_CHAT_ID is missing/invalid in .env")
         return
@@ -68,33 +73,52 @@ async def telegram_notifier(log):
     bot = Bot(token=BOT_TOKEN)
     log.info("Telegram notifier started. poll=%ss", BOT_POLL_SEC)
 
-    try:
-        while True:
-            try:
-                orders, _ = read_new_orders()
-                for order in orders:
-                    log_json(log, "SEND_ORDER", order)
-                    text = format_order(order)
-                    await bot.send_message(
-                        ADMIN_CHAT_ID,
-                        text,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                await asyncio.sleep(BOT_POLL_SEC)
+    # путь к jsonl с заказами
+    s = Settings()
+    orders_path = getattr(s, "out_jsonl_path", None) or getattr(s, "out_new_jsonl")
+    cursor_path = getattr(s, "bot_cursor_path", "bot_cursor.json")
 
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("Telegram notifier error")
-                await asyncio.sleep(5)
+    orders_file = Path(orders_path)
+    offset = load_cursor(cursor_path)
 
-    finally:
-        # закрываем aiohttp-сессию, иначе будет "Unclosed client session"
-        await bot.session.close()
-        log.info("Telegram notifier stopped.")
+    while True:
+        try:
+            if orders_file.exists():
+                with orders_file.open("r", encoding="utf-8") as f:
+                    # ✅ прыгаем на место, где остановились в прошлый раз
+                    f.seek(offset)
 
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
 
+                        try:
+                            order = json.loads(line)
+                        except Exception:
+                            log.warning("Bad json line: %r", line[:200])
+                            continue
+
+                        if not isinstance(order, dict):
+                            continue
+
+                        text = format_order(order)
+                        await bot.send_message(
+                            ADMIN_CHAT_ID,
+                            text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+
+                    # ✅ сохраняем новую позицию (после чтения)
+                    offset = f.tell()
+                    save_cursor(cursor_path, offset)
+
+            await asyncio.sleep(BOT_POLL_SEC)
+
+        except Exception:
+            log.exception("Telegram notifier error")
+            await asyncio.sleep(BOT_POLL_SEC)
 
 async def supervise_parser(runlog):
     global CURRENT_PARSER_PROC
@@ -164,7 +188,53 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
         runlog.info("Shutdown complete.")
 
+def load_orders_any_format(path: str, log) -> List[Dict[str, Any]]:
+    p = Path(path)
+    if not p.exists():
+        return []
 
+    # 1) пробуем JSONL (по строкам)
+    orders: List[Dict[str, Any]] = []
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    orders.append(obj)
+        if orders:
+            return orders
+    except Exception:
+        pass
+
+    # 2) пробуем обычный JSON (целиком)
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            obj = json.load(f)
+
+        if isinstance(obj, dict):
+            return [obj]
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+    except Exception as e:
+        log.warning("Cannot parse orders file %s: %r", str(p), e)
+
+    return []
+
+def load_cursor(path: str) -> int:
+    p = Path(path)
+    if not p.exists():
+        return 0
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return int(data.get("offset", 0))
+    except Exception:
+        return 0
+
+def save_cursor(path: str, offset: int) -> None:
+    Path(path).write_text(json.dumps({"offset": offset}, ensure_ascii=False), encoding="utf-8")
 
 if __name__ == "__main__":
     try:

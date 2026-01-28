@@ -1,3 +1,4 @@
+from asyncio.log import logger
 import os
 from datetime import datetime
 from playwright.sync_api import TimeoutError as PWTimeoutError
@@ -18,10 +19,15 @@ class ProfiClient:
         storage_state = getattr(self.s, "auth_state_path", None) or getattr(self.s, "storage_state_path", None)
         if storage_state:
             self.context = self.browser.new_context(storage_state=storage_state)
+            logger.info("Context created. storage_state=%s", getattr(self.s, "auth_state_path", None))
+
         else:
             self.context = self.browser.new_context()
+            logger.info("Context created. storage_state=%s", getattr(self.s, "auth_state_path", None))
+
 
         self.page = self.context.new_page()
+        logger.info("Client page: title=%r url=%s", self.page.title(), self.page.url)
         return self
 
     def __exit__(self, exc_type, exc, tb):

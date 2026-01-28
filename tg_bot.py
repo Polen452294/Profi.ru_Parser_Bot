@@ -35,7 +35,7 @@ async def main():
     try:
         while True:
             try:
-                orders, _ = read_new_orders()
+                orders, _ = orders, _ = read_new_orders()
                 if orders:
                     log.info("New orders detected in jsonl: %d", len(orders))
 
