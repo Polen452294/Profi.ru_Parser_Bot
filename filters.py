@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any
+import re
 
 
 # === Настройки фильтра ===
@@ -44,6 +45,31 @@ FALSE_POSITIVE_CONTAINS = (
     "ботан",   # ботан, ботаны, ботаник...
     "ботокс",  # ботокс
     "ботва",   # ботва
+)
+
+# === Чёрный список платформ (чтобы не приходили заказы на ботов НЕ в Telegram) ===
+# Логика: если в тексте явно упоминаются VK/Instagram/Max и т.п. — отсекаем заказ.
+# (По умолчанию это строгий отсев, даже если где-то ещё встречается "телеграм".)
+BLACKLIST_PATTERNS = (
+    # VK
+    re.compile(r"(?iu)\bvk\b"),
+    re.compile(r"(?iu)\bвк\b"),
+    re.compile(r"(?iu)\bvkontakte\b"),
+    re.compile(r"(?iu)\bвконтакте\b"),
+    re.compile(r"(?iu)\bvk\.com\b"),
+    re.compile(r"(?iu)\bvkontakte\.ru\b"),
+
+    # Instagram
+    re.compile(r"(?iu)\binstagram\b"),
+    re.compile(r"(?iu)\bинстаграм\b"),
+    re.compile(r"(?iu)\binsta\b"),
+    re.compile(r"(?iu)\binst\b"),
+    re.compile(r"(?iu)\binstagram\.com\b"),
+    re.compile(r"(?iu)\binstagr\.am\b"),
+
+    # Max / Макс
+    re.compile(r"(?iu)\bmax\b"),
+    re.compile(r"(?iu)\bмакс\b"),
 )
 
 
@@ -141,7 +167,7 @@ def _matches_bot_rule(tok: str) -> bool:
     suffix = tok[idx + 3 :]
 
     # Разрешаем только "короткий префикс" (<=4),
-    # чтобы "чат-бот" проходил, а "разработчик/работчик" не проходил.
+    # чтобы "чат-бот" проходил, а "разработчик/работчик" не проходило.
     # (исключения типа телеграм-бот обрабатываются отдельно через ALLOW_PHRASES)
     if len(prefix) > 4:
         return False
@@ -161,6 +187,16 @@ def _matches_bot_rule(tok: str) -> bool:
     return False
 
 
+def _is_blacklisted(text: str) -> bool:
+    """
+    True, если текст содержит признаки платформ из чёрного списка.
+    """
+    for rx in BLACKLIST_PATTERNS:
+        if rx.search(text):
+            return True
+    return False
+
+
 def order_matches_filter(data: Any) -> bool:
     """
     Главная функция фильтра: принимает dict/str и возвращает True, если заказ подходит.
@@ -168,6 +204,10 @@ def order_matches_filter(data: Any) -> bool:
     text = _normalize_text(_to_text(data))
 
     if not text:
+        return False
+
+    # 0) Чёрный список платформ (VK / Instagram / Max и т.п.)
+    if _is_blacklisted(text):
         return False
 
     # 1) Быстрые "разрешающие" фразы (исключения)
