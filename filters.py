@@ -4,46 +4,29 @@ from typing import Any
 import re
 
 
-ALLOW_PHRASES = {
+BOT_KEYWORDS = (
     "бот",
     "бота",
     "боты",
     "ботов",
-    "ботик",
-    "ботики",
     "чат-бот",
     "чат бот",
-    "chat-bot",
-    "chat bot",
-    "vk bot",
-    "vk-bot",
-    "вк бот",
-    "вк-бот",
-    "max bot",
-    "max-bot",
-    "макс бот",
-    "макс-бот",
-}
+    "bot",
+)
 
-ALLOWED_SUFFIXES = {
-    "", "а", "ы", "у", "ом", "ов", "е", "ам", "ами", "ах",
-    "ик", "ика", "ики", "иков", "ику", "иком", "иками",
-}
-
-FALSE_POSITIVE_TOKENS = {
-    "работа", "работу", "работы", "работой", "работам", "работах",
-    "доработка", "доработки", "доработку", "доработать", "доработаю",
-    "разработка", "разработки", "разработку", "разрабатывать",
-    "разработчик", "разработчика", "разработчики", "разработчиков",
-    "работчик", "работчика", "работчики", "работчиков",
-    "подработка", "подработки", "подработку", "подработать",
-    "переработка", "переработки", "переработку",
-}
-
-FALSE_POSITIVE_CONTAINS = (
-    "ботан",
-    "ботокс",
-    "ботва",
+DEV_KEYWORDS = (
+    "разработка",
+    "разработать",
+    "разработчик",
+    "создать",
+    "создание",
+    "сделать",
+    "написать",
+    "настройка бота",
+    "реализовать",
+    "нужен бот",
+    "требуется бот",
+    "бот под ключ",
 )
 
 VK_PATTERNS = (
@@ -52,12 +35,32 @@ VK_PATTERNS = (
     re.compile(r"(?iu)\bvkontakte\b"),
     re.compile(r"(?iu)\bвконтакте\b"),
     re.compile(r"(?iu)\bvk\.com\b"),
-    re.compile(r"(?iu)\bvkontakte\.ru\b"),
 )
 
 MAX_PATTERNS = (
     re.compile(r"(?iu)\bmax\b"),
     re.compile(r"(?iu)\bмакс\b"),
+)
+
+DISALLOWED_TOPICS = (
+    "таргет",
+    "таргетинг",
+    "таргетированная реклама",
+    "реклама",
+    "маркетинг",
+    "маркетолог",
+    "лидогенерация",
+    "лиды",
+    "трафик",
+    "контекстная реклама",
+    "директ",
+    "smm",
+    "смм",
+    "продвижение",
+    "рекламная кампания",
+    "специалист по рекламе",
+    "настройка рекламы",
+    "ведение рекламы",
 )
 
 DISALLOWED_PLATFORM_PATTERNS = (
@@ -70,13 +73,12 @@ DISALLOWED_PLATFORM_PATTERNS = (
     re.compile(r"(?iu)\binsta\b"),
     re.compile(r"(?iu)\bwhatsapp\b"),
     re.compile(r"(?iu)\bватсап\b"),
-    re.compile(r"(?iu)\bwhats app\b"),
     re.compile(r"(?iu)\bfacebook\b"),
     re.compile(r"(?iu)\bdiscord\b"),
 )
 
 BUDGET_PATTERNS = (
-    re.compile(r"(?iu)(?:бюджет|budget|стоимость|цена|price)\s*[:\-]?\s*(?:от\s*)?(\d[\d\s]{0,12})"),
+    re.compile(r"(?iu)(?:бюджет|budget|стоимость|цена|price)\s*[:\-]?\s*(?:от|до)?\s*(\d[\d\s]{0,12})"),
     re.compile(r"(?iu)(\d[\d\s]{3,12})\s*(?:₽|руб\.?|р\b|rub\b)"),
 )
 
@@ -102,18 +104,18 @@ def _to_text(data: Any) -> str:
             "price",
             "amount",
         ):
-            v = data.get(key)
-            if isinstance(v, str) and v.strip():
-                parts.append(v.strip())
-            elif isinstance(v, (int, float)):
-                parts.append(str(v))
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, (int, float)):
+                parts.append(str(value))
 
         if not parts:
-            for v in data.values():
-                if isinstance(v, str) and v.strip():
-                    parts.append(v.strip())
-                elif isinstance(v, (int, float)):
-                    parts.append(str(v))
+            for value in data.values():
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+                elif isinstance(value, (int, float)):
+                    parts.append(str(value))
 
         return "\n".join(parts)
 
@@ -123,85 +125,31 @@ def _to_text(data: Any) -> str:
     return str(data)
 
 
-def _normalize_text(s: str) -> str:
-    s = (s or "").lower().replace("ё", "е")
-    s = s.replace("\xa0", " ")
-    return " ".join(s.split())
+def _normalize_text(text: str) -> str:
+    text = (text or "").lower().replace("ё", "е").replace("\xa0", " ")
+    return " ".join(text.split())
 
 
-def _tokenize(s: str) -> list[str]:
-    out_chars = []
-    for ch in s:
-        if ch.isalnum() or ch in "-_":
-            out_chars.append(ch)
-        else:
-            out_chars.append(" ")
-    return [t for t in "".join(out_chars).split() if t]
+def _contains_bot_keyword(text: str) -> bool:
+    return any(keyword in text for keyword in BOT_KEYWORDS)
 
 
-def _is_false_positive_token(tok: str) -> bool:
-    if tok in FALSE_POSITIVE_TOKENS:
-        return True
-
-    for bad in FALSE_POSITIVE_CONTAINS:
-        if bad in tok:
-            return True
-
-    if "работ" in tok or "разработ" in tok or "подработ" in tok or "переработ" in tok:
-        return True
-
-    return False
-
-
-def _matches_bot_rule(tok: str) -> bool:
-    if "бот" not in tok:
-        return False
-
-    if _is_false_positive_token(tok):
-        return False
-
-    idx = tok.find("бот")
-    if idx == -1:
-        return False
-
-    prefix = tok[:idx]
-    suffix = tok[idx + 3:]
-
-    if len(prefix) > 4:
-        return False
-
-    if suffix in ALLOWED_SUFFIXES:
-        return True
-
-    for suf in sorted(ALLOWED_SUFFIXES, key=len, reverse=True):
-        if suf and suffix.startswith(suf):
-            return True
-
-    return False
-
-
-def _contains_bot_request(text: str) -> bool:
-    for phrase in ALLOW_PHRASES:
-        if phrase in text:
-            return True
-
-    for tok in _tokenize(text):
-        if _matches_bot_rule(tok):
-            return True
-
-    return False
+def _contains_dev_intent(text: str) -> bool:
+    return any(keyword in text for keyword in DEV_KEYWORDS)
 
 
 def _contains_vk_or_max(text: str) -> bool:
     for rx in VK_PATTERNS:
         if rx.search(text):
             return True
-
     for rx in MAX_PATTERNS:
         if rx.search(text):
             return True
-
     return False
+
+
+def _contains_disallowed_topics(text: str) -> bool:
+    return any(keyword in text for keyword in DISALLOWED_TOPICS)
 
 
 def _contains_disallowed_platforms(text: str) -> bool:
@@ -237,7 +185,7 @@ def _budget_matches(text: str) -> bool:
     budget = _extract_budget_value(text)
     if budget is None:
         return True
-    return budget > 10000
+    return budget >= 10000
 
 
 def order_matches_filter(data: Any) -> bool:
@@ -246,13 +194,19 @@ def order_matches_filter(data: Any) -> bool:
     if not text:
         return False
 
-    if not _contains_bot_request(text):
+    if _contains_disallowed_topics(text):
+        return False
+
+    if _contains_disallowed_platforms(text):
         return False
 
     if not _contains_vk_or_max(text):
         return False
 
-    if _contains_disallowed_platforms(text):
+    if not _contains_bot_keyword(text):
+        return False
+
+    if not _contains_dev_intent(text):
         return False
 
     if not _budget_matches(text):
