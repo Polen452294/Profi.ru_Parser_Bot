@@ -1,33 +1,35 @@
 from __future__ import annotations
+
 from typing import Any
 import re
 
 
-# === Настройки фильтра ===
-
-# Явные фразы, которые должны проходить, даже если правило "<=4 символа перед 'бот'"
-# не сработало (например, "телеграм-бот" -> "телеграм-" длиннее 4).
 ALLOW_PHRASES = {
-    "телеграм-бот",
-    "телеграм бот",
-    "telegram-bot",
-    "telegram bot",
-    "tg-bot",
-    "tg bot",
-    "тг-бот",
+    "бот",
+    "бота",
+    "боты",
+    "ботов",
+    "ботик",
+    "ботики",
+    "чат-бот",
+    "чат бот",
+    "chat-bot",
+    "chat bot",
+    "vk bot",
+    "vk-bot",
+    "вк бот",
+    "вк-бот",
+    "max bot",
+    "max-bot",
+    "макс бот",
+    "макс-бот",
 }
 
-# Суффиксы после "бот", которые считаем нормальными окончаниями слова "бот".
-# (чтобы "бота/боты/ботов/ботом/ботами/ботик/ботики..." проходили)
 ALLOWED_SUFFIXES = {
     "", "а", "ы", "у", "ом", "ов", "е", "ам", "ами", "ах",
     "ик", "ика", "ики", "иков", "ику", "иком", "иками",
 }
 
-# Слова, в которых "бот" встречается как часть других слов (ложные срабатывания),
-# или домены типа "работчик", "разработчик", "подработка" и т.д.
-# Важно: мы НЕ "баним заказ", если эти слова встречаются рядом.
-# Мы просто не считаем такие токены "валидным попаданием по боту".
 FALSE_POSITIVE_TOKENS = {
     "работа", "работу", "работы", "работой", "работам", "работах",
     "доработка", "доработки", "доработку", "доработать", "доработаю",
@@ -38,45 +40,48 @@ FALSE_POSITIVE_TOKENS = {
     "переработка", "переработки", "переработку",
 }
 
-# Ещё несколько частых "не бот" слов, которые содержат "бот" в середине
-# и могут совпасть по простому правилу.
-# (можешь дополнять по логам)
 FALSE_POSITIVE_CONTAINS = (
-    "ботан",   # ботан, ботаны, ботаник...
-    "ботокс",  # ботокс
-    "ботва",   # ботва
+    "ботан",
+    "ботокс",
+    "ботва",
 )
 
-# === Чёрный список платформ (чтобы не приходили заказы на ботов НЕ в Telegram) ===
-# Логика: если в тексте явно упоминаются VK/Instagram/Max и т.п. — отсекаем заказ.
-# (По умолчанию это строгий отсев, даже если где-то ещё встречается "телеграм".)
-BLACKLIST_PATTERNS = (
-    # VK
+VK_PATTERNS = (
     re.compile(r"(?iu)\bvk\b"),
     re.compile(r"(?iu)\bвк\b"),
     re.compile(r"(?iu)\bvkontakte\b"),
     re.compile(r"(?iu)\bвконтакте\b"),
     re.compile(r"(?iu)\bvk\.com\b"),
     re.compile(r"(?iu)\bvkontakte\.ru\b"),
+)
 
-    # Instagram
-    re.compile(r"(?iu)\binstagram\b"),
-    re.compile(r"(?iu)\bинстаграм\b"),
-    re.compile(r"(?iu)\binsta\b"),
-    re.compile(r"(?iu)\binst\b"),
-    re.compile(r"(?iu)\binstagram\.com\b"),
-    re.compile(r"(?iu)\binstagr\.am\b"),
-
-    # Max / Макс
+MAX_PATTERNS = (
     re.compile(r"(?iu)\bmax\b"),
     re.compile(r"(?iu)\bмакс\b"),
 )
 
+DISALLOWED_PLATFORM_PATTERNS = (
+    re.compile(r"(?iu)\btelegram\b"),
+    re.compile(r"(?iu)\bтелеграм\b"),
+    re.compile(r"(?iu)\bтг\b"),
+    re.compile(r"(?iu)\btg\b"),
+    re.compile(r"(?iu)\binstagram\b"),
+    re.compile(r"(?iu)\bинстаграм\b"),
+    re.compile(r"(?iu)\binsta\b"),
+    re.compile(r"(?iu)\bwhatsapp\b"),
+    re.compile(r"(?iu)\bватсап\b"),
+    re.compile(r"(?iu)\bwhats app\b"),
+    re.compile(r"(?iu)\bfacebook\b"),
+    re.compile(r"(?iu)\bdiscord\b"),
+)
+
+BUDGET_PATTERNS = (
+    re.compile(r"(?iu)(?:бюджет|budget|стоимость|цена|price)\s*[:\-]?\s*(?:от\s*)?(\d[\d\s]{0,12})"),
+    re.compile(r"(?iu)(\d[\d\s]{3,12})\s*(?:₽|руб\.?|р\b|rub\b)"),
+)
+
 
 def _to_text(data: Any) -> str:
-    """
-    Превращает вход (str / dict / list / etc.) в единый текст для фильтрации.
-    """
     if data is None:
         return ""
 
@@ -84,18 +89,31 @@ def _to_text(data: Any) -> str:
         return data
 
     if isinstance(data, dict):
-        # Склеим самые вероятные поля
         parts: list[str] = []
-        for key in ("title", "text", "description", "details", "snippet", "category"):
+
+        for key in (
+            "title",
+            "text",
+            "description",
+            "details",
+            "snippet",
+            "category",
+            "budget",
+            "price",
+            "amount",
+        ):
             v = data.get(key)
             if isinstance(v, str) and v.strip():
                 parts.append(v.strip())
+            elif isinstance(v, (int, float)):
+                parts.append(str(v))
 
-        # Если ничего не нашли — соберём любые строковые значения
         if not parts:
             for v in data.values():
                 if isinstance(v, str) and v.strip():
                     parts.append(v.strip())
+                elif isinstance(v, (int, float)):
+                    parts.append(str(v))
 
         return "\n".join(parts)
 
@@ -106,17 +124,12 @@ def _to_text(data: Any) -> str:
 
 
 def _normalize_text(s: str) -> str:
-    """
-    Нормализация текста: lower, замена 'ё' -> 'е', выравнивание пробелов.
-    """
     s = (s or "").lower().replace("ё", "е")
+    s = s.replace("\xa0", " ")
     return " ".join(s.split())
 
 
 def _tokenize(s: str) -> list[str]:
-    """
-    Простая токенизация: оставляем буквы/цифры/дефис, остальное -> разделитель.
-    """
     out_chars = []
     for ch in s:
         if ch.isalnum() or ch in "-_":
@@ -127,9 +140,6 @@ def _tokenize(s: str) -> list[str]:
 
 
 def _is_false_positive_token(tok: str) -> bool:
-    """
-    Отсекаем токены, которые выглядят как 'работчик/разработчик' и т.п.
-    """
     if tok in FALSE_POSITIVE_TOKENS:
         return True
 
@@ -137,8 +147,6 @@ def _is_false_positive_token(tok: str) -> bool:
         if bad in tok:
             return True
 
-    # Частый кейс: слова с корнем "работ" дают ложные совпадения через "...бот..."
-    # Например: "работчик" -> "ра" + "бот" (<=4) и может пройти без доп. отсечки.
     if "работ" in tok or "разработ" in tok or "подработ" in tok or "переработ" in tok:
         return True
 
@@ -146,13 +154,6 @@ def _is_false_positive_token(tok: str) -> bool:
 
 
 def _matches_bot_rule(tok: str) -> bool:
-    """
-    True, если токен считается "бот"-словом по правилам:
-    - содержит "бот"
-    - перед "бот" в этом токене <= 4 символов (лат/кирил/цифры/дефис/подчёрк)
-    - суффикс после "бот" похож на окончания слова "бот"
-    - токен не является ложным совпадением (работчик/разработчик и т.п.)
-    """
     if "бот" not in tok:
         return False
 
@@ -164,64 +165,97 @@ def _matches_bot_rule(tok: str) -> bool:
         return False
 
     prefix = tok[:idx]
-    suffix = tok[idx + 3 :]
+    suffix = tok[idx + 3:]
 
-    # Разрешаем только "короткий префикс" (<=4),
-    # чтобы "чат-бот" проходил, а "разработчик/работчик" не проходило.
-    # (исключения типа телеграм-бот обрабатываются отдельно через ALLOW_PHRASES)
     if len(prefix) > 4:
         return False
 
-    # Проверка суффикса (окончания). Если суффикс длиннее, но начинается с одного
-    # из разрешённых окончаний — тоже принимаем (например "ботики", "ботов", "ботом").
-    # Здесь мы считаем окончания по первым 1-5 символам.
     if suffix in ALLOWED_SUFFIXES:
         return True
 
-    # Иногда suffix может быть "ов..." и т.п. Проверим по началу.
     for suf in sorted(ALLOWED_SUFFIXES, key=len, reverse=True):
         if suf and suffix.startswith(suf):
             return True
 
-    # Если после "бот" идёт что-то странное, не похоже на слово "бот" — не считаем.
     return False
 
 
-def _is_blacklisted(text: str) -> bool:
-    """
-    True, если текст содержит признаки платформ из чёрного списка.
-    """
-    for rx in BLACKLIST_PATTERNS:
+def _contains_bot_request(text: str) -> bool:
+    for phrase in ALLOW_PHRASES:
+        if phrase in text:
+            return True
+
+    for tok in _tokenize(text):
+        if _matches_bot_rule(tok):
+            return True
+
+    return False
+
+
+def _contains_vk_or_max(text: str) -> bool:
+    for rx in VK_PATTERNS:
+        if rx.search(text):
+            return True
+
+    for rx in MAX_PATTERNS:
+        if rx.search(text):
+            return True
+
+    return False
+
+
+def _contains_disallowed_platforms(text: str) -> bool:
+    for rx in DISALLOWED_PLATFORM_PATTERNS:
         if rx.search(text):
             return True
     return False
 
 
+def _extract_budget_value(text: str) -> int | None:
+    for rx in BUDGET_PATTERNS:
+        match = rx.search(text)
+        if not match:
+            continue
+
+        raw_value = match.group(1)
+        digits = re.sub(r"[^\d]", "", raw_value)
+        if not digits:
+            continue
+
+        try:
+            value = int(digits)
+        except ValueError:
+            continue
+
+        if value > 0:
+            return value
+
+    return None
+
+
+def _budget_matches(text: str) -> bool:
+    budget = _extract_budget_value(text)
+    if budget is None:
+        return True
+    return budget > 10000
+
+
 def order_matches_filter(data: Any) -> bool:
-    """
-    Главная функция фильтра: принимает dict/str и возвращает True, если заказ подходит.
-    """
     text = _normalize_text(_to_text(data))
 
     if not text:
         return False
 
-    # 0) Чёрный список платформ (VK / Instagram / Max и т.п.)
-    if _is_blacklisted(text):
+    if not _contains_bot_request(text):
         return False
 
-    # 1) Быстрые "разрешающие" фразы (исключения)
-    # Например "телеграм-бот" должен проходить, хотя "телеграм-" > 4.
-    for phrase in ALLOW_PHRASES:
-        if phrase in text:
-            return True
+    if not _contains_vk_or_max(text):
+        return False
 
-    # 2) Токенизация и проверка по правилу "<=4 символа перед 'бот'"
-    tokens = _tokenize(text)
-    for tok in tokens:
-        # Также допускаем вариант без дефисов/подчёркиваний в токене
-        # (чатбот, телеграмбот — но телеграмбот всё равно попадёт через ALLOW_PHRASES)
-        if _matches_bot_rule(tok):
-            return True
+    if _contains_disallowed_platforms(text):
+        return False
 
-    return False
+    if not _budget_matches(text):
+        return False
+
+    return True
