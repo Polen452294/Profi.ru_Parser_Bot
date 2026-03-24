@@ -18,28 +18,43 @@ class ProfiClient:
         self.context = None
         self.page = None
 
-
     def start(self) -> "ProfiClient":
-        """
-        Явный запуск клиента (вместо `with`), чтобы можно было пересоздавать клиент в рантайме.
-        """
         if self.browser or self.context or self.page:
             self.close()
 
+        launch_args = [
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-features=UseSkiaRenderer,Vulkan",
+        ]
+
         self.browser = self.p.chromium.launch(
-            headless=getattr(self.s, "headless", False)
+            headless=getattr(self.s, "headless", True),
+            args=launch_args,
         )
 
-        storage_state = getattr(self.s, "auth_state_path", None) or getattr(self.s, "storage_state_path", None)
+        storage_state = (
+            getattr(self.s, "auth_state_path", None)
+            or getattr(self.s, "storage_state_path", None)
+        )
+
         if storage_state:
-            self.context = self.browser.new_context(storage_state=storage_state)
+            self.context = self.browser.new_context(
+                storage_state=storage_state,
+                viewport={"width": 1440, "height": 900},
+            )
             logger.info("Context created. storage_state=%s", storage_state)
         else:
-            self.context = self.browser.new_context()
+            self.context = self.browser.new_context(
+                viewport={"width": 1440, "height": 900},
+            )
             logger.info("Context created. storage_state=None")
 
         self.page = self.context.new_page()
-        logger.info("Client page created. title=%r url=%s", self.page.title(), self.page.url)
+        logger.info("Client page created. url=%s", self.page.url)
         return self
 
     def close(self):
@@ -76,20 +91,14 @@ class ProfiClient:
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
-
     def open_board(self):
         url = getattr(self.s, "page_url", "https://profi.ru/backoffice/")
-        self.page.goto(url, wait_until="domcontentloaded")
+        self.page.goto(url, wait_until="domcontentloaded", timeout=90_000)
 
     def soft_refresh(self):
-        """
-        Мягкое обновление страницы.
-        Если reload упал по DNS/интернету — пробуем goto(page_url).
-        """
         try:
             self.page.reload(wait_until="domcontentloaded", timeout=90_000)
             return
-
         except PlaywrightError as e:
             msg = str(e)
 
@@ -104,10 +113,6 @@ class ProfiClient:
         return self.page.locator(self.s.card_selector)
 
     def wait_cards(self) -> bool:
-        """
-        НЕ падаем по таймауту.
-        Возвращаем True если карточки появились в DOM, иначе False.
-        """
         try:
             self.page.wait_for_selector(
                 self.s.card_selector,
