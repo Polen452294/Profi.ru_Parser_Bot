@@ -29,19 +29,6 @@ DEV_KEYWORDS = (
     "бот под ключ",
 )
 
-VK_PATTERNS = (
-    re.compile(r"(?iu)\bvk\b"),
-    re.compile(r"(?iu)\bвк\b"),
-    re.compile(r"(?iu)\bvkontakte\b"),
-    re.compile(r"(?iu)\bвконтакте\b"),
-    re.compile(r"(?iu)\bvk\.com\b"),
-)
-
-MAX_PATTERNS = (
-    re.compile(r"(?iu)\bmax\b"),
-    re.compile(r"(?iu)\bмакс\b"),
-)
-
 DISALLOWED_TOPICS = (
     "таргет",
     "таргетинг",
@@ -64,10 +51,6 @@ DISALLOWED_TOPICS = (
 )
 
 DISALLOWED_PLATFORM_PATTERNS = (
-    re.compile(r"(?iu)\btelegram\b"),
-    re.compile(r"(?iu)\bтелеграм\b"),
-    re.compile(r"(?iu)\bтг\b"),
-    re.compile(r"(?iu)\btg\b"),
     re.compile(r"(?iu)\binstagram\b"),
     re.compile(r"(?iu)\bинстаграм\b"),
     re.compile(r"(?iu)\binsta\b"),
@@ -138,16 +121,6 @@ def _contains_dev_intent(text: str) -> bool:
     return any(keyword in text for keyword in DEV_KEYWORDS)
 
 
-def _contains_vk_or_max(text: str) -> bool:
-    for rx in VK_PATTERNS:
-        if rx.search(text):
-            return True
-    for rx in MAX_PATTERNS:
-        if rx.search(text):
-            return True
-    return False
-
-
 def _contains_disallowed_topics(text: str) -> bool:
     return any(keyword in text for keyword in DISALLOWED_TOPICS)
 
@@ -198,9 +171,6 @@ def order_matches_filter(data: Any) -> bool:
         return False
 
     if _contains_disallowed_platforms(text):
-        return False
-
-    if not _contains_vk_or_max(text):
         return False
 
     if not _contains_bot_keyword(text):
