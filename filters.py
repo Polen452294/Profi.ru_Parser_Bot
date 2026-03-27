@@ -4,14 +4,13 @@ from typing import Any
 import re
 
 
-BOT_KEYWORDS = (
-    "бот",
-    "бота",
-    "боты",
-    "ботов",
-    "чат-бот",
-    "чат бот",
-    "bot",
+BOT_WORD_PATTERNS = (
+    re.compile(r"(?iu)\bбот\b"),
+    re.compile(r"(?iu)\bбота\b"),
+    re.compile(r"(?iu)\bботы\b"),
+    re.compile(r"(?iu)\bботов\b"),
+    re.compile(r"(?iu)\bчат[- ]?бот\b"),
+    re.compile(r"(?iu)\bbot\b"),
 )
 
 DEV_KEYWORDS = (
@@ -22,11 +21,9 @@ DEV_KEYWORDS = (
     "создание",
     "сделать",
     "написать",
-    "настройка бота",
     "реализовать",
-    "нужен бот",
-    "требуется бот",
-    "бот под ключ",
+    "нужен",
+    "требуется",
 )
 
 DISALLOWED_TOPICS = (
@@ -113,8 +110,11 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _contains_bot_keyword(text: str) -> bool:
-    return any(keyword in text for keyword in BOT_KEYWORDS)
+def _contains_bot_word(text: str) -> bool:
+    for rx in BOT_WORD_PATTERNS:
+        if rx.search(text):
+            return True
+    return False
 
 
 def _contains_dev_intent(text: str) -> bool:
@@ -167,16 +167,16 @@ def order_matches_filter(data: Any) -> bool:
     if not text:
         return False
 
+    if not _contains_bot_word(text):
+        return False
+
+    if not _contains_dev_intent(text):
+        return False
+
     if _contains_disallowed_topics(text):
         return False
 
     if _contains_disallowed_platforms(text):
-        return False
-
-    if not _contains_bot_keyword(text):
-        return False
-
-    if not _contains_dev_intent(text):
         return False
 
     if not _budget_matches(text):

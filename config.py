@@ -9,7 +9,7 @@ class Settings:
     auth_state_path: str = "storage_state.json"
     out_jsonl_path: str = "new_orders.jsonl"
 
-    headless: bool = True
+    headless: bool = False
     selector_timeout_ms: int = 60_000
     card_selector: str = 'a[data-testid$="_order-snippet"]'
 
