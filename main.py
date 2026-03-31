@@ -14,7 +14,6 @@ from filters import order_matches_filter
 
 logger = logging.getLogger("parser")
 
-# 🔧 Включай на короткое время для отладки фильтра
 DEBUG_FILTER = False
 
 
@@ -29,18 +28,33 @@ def _get_poll_params(s: Settings):
 
 
 def _start_client(p, s: Settings) -> ProfiClient:
-    """
-    Создаём новый клиент, стартуем его и открываем доску.
-    """
     client = ProfiClient(p, s).start()
     client.open_board()
 
     logger.info(
         "Page after open_board: title=%r url=%s",
         client.page.title(),
-        client.page.url
+        client.page.url,
     )
     return client
+
+
+def _restart_client(client: ProfiClient | None, p, s: Settings, reason: str) -> ProfiClient:
+    logger.warning("Restarting Playwright client. reason=%s", reason)
+
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            logger.exception("Failed to close client during restart")
+
+    time.sleep(5)
+    new_client = _start_client(p, s)
+
+    if not new_client.wait_cards():
+        logger.warning("No cards right after client restart")
+
+    return new_client
 
 
 def main():
@@ -49,14 +63,13 @@ def main():
     with sync_playwright() as p:
         ensure_auth_state(p, s)
 
-        # 2) Загружаем seen_ids и параметры опроса
         seen_ids = load_seen_ids(s.seen_ids_path)
         poll_base, poll_jitter = _get_poll_params(s)
 
         logger.info("Starting parser monitoring...")
         logger.info(
             "Settings: page_url=%s, poll_base=%s, poll_jitter=%s",
-            s.page_url, poll_base, poll_jitter
+            s.page_url, poll_base, poll_jitter,
         )
         logger.info("Loaded seen_ids: %d", len(seen_ids))
 
@@ -74,32 +87,40 @@ def main():
                     client.soft_refresh()
                     net_errors = 0
 
-                except Exception as e:
-                    msg = str(e)
+                except RuntimeError as e:
+                    if str(e) == "PAGE_OR_BROWSER_CRASHED":
+                        logger.exception("Browser/page crashed during refresh")
+                        client = _restart_client(client, p, s, "page crashed on refresh")
+                        continue
+                    raise
 
-                    if "ERR_NAME_NOT_RESOLVED" in msg or "ERR_INTERNET_DISCONNECTED" in msg:
+                except Exception as e:
+                    msg = str(e).lower()
+
+                    if "err_name_not_resolved" in msg or "err_internet_disconnected" in msg:
                         net_errors += 1
                         logger.warning("Network/DNS error #%d: %s", net_errors, e)
 
                         if net_errors >= 3:
-                            logger.warning("Too many network errors подряд -> restarting client")
-
-                            try:
-                                client.close()
-                            except Exception:
-                                logger.exception("Failed to close client on restart")
-
-                            client = _start_client(p, s)
+                            client = _restart_client(client, p, s, "too many network errors")
                             net_errors = 0
 
                         time.sleep(20)
                         continue
 
-                    logger.exception("Unexpected error in main loop (refresh). Sleeping and continuing.")
-                    time.sleep(10)
+                    logger.exception("Unexpected error in main loop (refresh). Restarting client.")
+                    client = _restart_client(client, p, s, "unexpected refresh error")
                     continue
 
-                ok = client.wait_cards()
+                try:
+                    ok = client.wait_cards()
+                except RuntimeError as e:
+                    if str(e) == "PAGE_OR_BROWSER_CRASHED":
+                        logger.exception("Browser/page crashed while waiting cards")
+                        client = _restart_client(client, p, s, "page crashed while waiting cards")
+                        continue
+                    raise
+
                 if not ok:
                     title = client.page.title()
                     url = client.page.url
@@ -107,26 +128,51 @@ def main():
                     if ("вход" in title.lower()) or ("login" in title.lower()):
                         logger.warning(
                             "Seems logged out (TITLE=%r, URL=%s). Re-authenticating...",
-                            title, url
+                            title, url,
                         )
                         ensure_auth_state(p, s)
-                        client.open_board()
+                        client = _restart_client(client, p, s, "re-auth after logout")
                         sleep_human(5, 5)
                         continue
 
                     logger.warning(
                         "Cards not found within %sms. Re-opening board. URL=%s TITLE=%r",
-                        s.selector_timeout_ms, url, title
+                        s.selector_timeout_ms, url, title,
                     )
-                    client.open_board()
+
+                    try:
+                        client.open_board()
+                    except RuntimeError as e:
+                        if str(e) == "PAGE_OR_BROWSER_CRASHED":
+                            logger.exception("Browser/page crashed while reopening board")
+                            client = _restart_client(client, p, s, "page crashed while reopening board")
+                            continue
+                        raise
+                    except Exception:
+                        logger.exception("Failed to reopen board. Restarting client.")
+                        client = _restart_client(client, p, s, "failed open_board after no cards")
+                        continue
+
                     sleep_human(10, 10)
                     continue
 
-                cards = client.cards_locator()
+                try:
+                    cards = client.cards_locator()
+                    card_count = cards.count()
+                except Exception:
+                    logger.exception("Failed to access cards locator. Restarting client.")
+                    client = _restart_client(client, p, s, "cards locator failed")
+                    continue
+
                 new_orders = []
 
-                for i in range(cards.count()):
-                    data = parse_order_snippet(cards.nth(i))
+                for i in range(card_count):
+                    try:
+                        data = parse_order_snippet(cards.nth(i))
+                    except Exception:
+                        logger.exception("Failed to parse card #%d", i)
+                        continue
+
                     oid = data.get("order_id")
 
                     if not oid:
@@ -142,7 +188,7 @@ def main():
                         text = f"{t} {d}".lower()
                         logger.info(
                             "FILTER oid=%s match=%s | title=%r | desc_len=%d | text_has_бот=%s",
-                            oid, match, t, len(d), ("бот" in text)
+                            oid, match, t, len(d), ("бот" in text),
                         )
 
                     if not match:
@@ -158,7 +204,7 @@ def main():
                     save_seen_ids(s.seen_ids_path, seen_ids)
                     logger.info(
                         "Saved %d new orders. seen_ids=%d",
-                        len(new_orders), len(seen_ids)
+                        len(new_orders), len(seen_ids),
                     )
 
                 sleep_human(poll_base, poll_jitter)

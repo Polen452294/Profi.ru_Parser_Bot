@@ -3,7 +3,6 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import Any, Dict, List
 from asyncio.subprocess import Process
 
 from dotenv import load_dotenv
@@ -107,42 +106,47 @@ async def telegram_notifier(log):
     orders_file = Path(orders_path)
     offset = load_cursor(cursor_path)
 
-    while True:
-        try:
-            if orders_file.exists():
-                with orders_file.open("r", encoding="utf-8") as f:
-                    f.seek(offset)
+    try:
+        while True:
+            try:
+                if orders_file.exists():
+                    with orders_file.open("r", encoding="utf-8") as f:
+                        f.seek(offset)
 
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
 
-                        try:
-                            order = json.loads(line)
-                        except Exception:
-                            log.warning("Bad json line: %r", line[:200])
-                            continue
+                            try:
+                                order = json.loads(line)
+                            except Exception:
+                                log.warning("Bad json line: %r", line[:200])
+                                continue
 
-                        if not isinstance(order, dict):
-                            continue
+                            if not isinstance(order, dict):
+                                continue
 
-                        text = format_order(order)
-                        await bot.send_message(
-                            ADMIN_CHAT_ID,
-                            text,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                        )
+                            text = format_order(order)
+                            await bot.send_message(
+                                ADMIN_CHAT_ID,
+                                text,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True,
+                            )
 
-                    offset = f.tell()
-                    save_cursor(cursor_path, offset)
+                        offset = f.tell()
+                        save_cursor(cursor_path, offset)
 
-            await asyncio.sleep(BOT_POLL_SEC)
+                await asyncio.sleep(BOT_POLL_SEC)
 
-        except Exception:
-            log.exception("Telegram notifier error")
-            await asyncio.sleep(BOT_POLL_SEC)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Telegram notifier error")
+                await asyncio.sleep(BOT_POLL_SEC)
+    finally:
+        await bot.session.close()
 
 
 async def supervise_parser(runlog):

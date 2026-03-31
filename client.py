@@ -29,6 +29,10 @@ class ProfiClient:
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-features=UseSkiaRenderer,Vulkan",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
         ]
 
         self.browser = self.p.chromium.launch(
@@ -100,9 +104,22 @@ class ProfiClient:
             self.page.reload(wait_until="domcontentloaded", timeout=90_000)
             return
         except PlaywrightError as e:
-            msg = str(e)
+            msg = str(e).lower()
 
-            if any(x in msg for x in ("ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED")):
+            if any(x in msg for x in (
+                "page crashed",
+                "target page, context or browser has been closed",
+                "browser has been closed",
+                "context has been closed",
+                "page has been closed",
+            )):
+                raise RuntimeError("PAGE_OR_BROWSER_CRASHED") from e
+
+            if any(x in msg for x in (
+                "err_name_not_resolved",
+                "err_internet_disconnected",
+                "net::err",
+            )):
                 url = getattr(self.s, "page_url", "https://profi.ru/backoffice/")
                 self.page.goto(url, wait_until="domcontentloaded", timeout=90_000)
                 return
@@ -123,6 +140,17 @@ class ProfiClient:
         except PWTimeoutError:
             self.save_debug(prefix="no_cards")
             return False
+        except PlaywrightError as e:
+            msg = str(e).lower()
+            if any(x in msg for x in (
+                "page crashed",
+                "target page, context or browser has been closed",
+                "browser has been closed",
+                "context has been closed",
+                "page has been closed",
+            )):
+                raise RuntimeError("PAGE_OR_BROWSER_CRASHED") from e
+            raise
 
     def save_debug(self, prefix: str = "debug"):
         debug_dir = getattr(self.s, "debug_dir", "logs/debug")
@@ -133,14 +161,16 @@ class ProfiClient:
             html_path = os.path.join(debug_dir, f"{prefix}_{ts}.html")
 
             try:
-                self.page.screenshot(path=png_path, full_page=True)
+                if self.page:
+                    self.page.screenshot(path=png_path, full_page=True)
             except Exception:
                 pass
 
             try:
-                html = self.page.content()
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(html)
+                if self.page:
+                    html = self.page.content()
+                    with open(html_path, "w", encoding="utf-8") as f:
+                        f.write(html)
             except Exception:
                 pass
         except Exception:
