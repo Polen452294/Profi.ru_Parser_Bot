@@ -7,19 +7,19 @@ from asyncio.subprocess import Process
 
 from dotenv import load_dotenv
 from aiogram import Bot
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 
 from config import Settings
 from tg_formatter import format_order
 from logger_setup import setup_logger
-from aiogram.client.session.aiohttp import AiohttpSession
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-
 TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "socks5://127.0.0.1:10808").strip()
 
 PARSER_SCRIPT = "main.py"
@@ -48,6 +48,7 @@ async def start_parser_process(log) -> Process:
         env.pop(key, None)
 
     log.info("Starting parser subprocess WITHOUT proxychains: %s %s", python_exe, PARSER_SCRIPT)
+
     proc = await asyncio.create_subprocess_exec(
         python_exe,
         PARSER_SCRIPT,
@@ -58,24 +59,29 @@ async def start_parser_process(log) -> Process:
 
     global CURRENT_PARSER_PROC
     CURRENT_PARSER_PROC = proc
+
     log.info("Parser started. PID=%s", proc.pid)
     return proc
 
 
 async def pipe_process_output(proc: Process, log):
     assert proc.stdout is not None
+
     while True:
         line = await proc.stdout.readline()
         if not line:
             break
+
         text = line.decode(errors="ignore").rstrip()
         log.info("[PARSER] %s", text)
 
 
 def load_cursor(path: str) -> int:
     p = Path(path)
+
     if not p.exists():
         return 0
+
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return int(data.get("offset", 0))
@@ -90,6 +96,23 @@ def save_cursor(path: str, offset: int) -> None:
     )
 
 
+async def send_order_message(bot: Bot, log, text: str) -> None:
+    while True:
+        try:
+            await bot.send_message(
+                ADMIN_CHAT_ID,
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            await asyncio.sleep(1)
+            return
+
+        except TelegramRetryAfter as e:
+            log.warning("Telegram flood control. Sleeping %s seconds", e.retry_after)
+            await asyncio.sleep(e.retry_after + 2)
+
+
 async def telegram_notifier(log):
     if not BOT_TOKEN:
         log.error("BOT_TOKEN is missing in .env")
@@ -101,7 +124,8 @@ async def telegram_notifier(log):
 
     session = AiohttpSession(proxy=TELEGRAM_PROXY)
     bot = Bot(token=BOT_TOKEN, session=session)
-    log.info("Telegram notifier started. poll=%ss", BOT_POLL_SEC)
+
+    log.info("Telegram notifier started. poll=%ss proxy=%s", BOT_POLL_SEC, TELEGRAM_PROXY)
 
     s = Settings()
     orders_path = getattr(s, "out_jsonl_path", None) or getattr(s, "out_new_jsonl")
@@ -109,6 +133,11 @@ async def telegram_notifier(log):
 
     orders_file = Path(orders_path)
     offset = load_cursor(cursor_path)
+
+    if offset == 0 and orders_file.exists():
+        offset = orders_file.stat().st_size
+        save_cursor(cursor_path, offset)
+        log.info("Cursor initialized to end of orders file. offset=%s", offset)
 
     try:
         while True:
@@ -119,6 +148,7 @@ async def telegram_notifier(log):
 
                         for line in f:
                             line = line.strip()
+
                             if not line:
                                 continue
 
@@ -132,12 +162,7 @@ async def telegram_notifier(log):
                                 continue
 
                             text = format_order(order)
-                            await bot.send_message(
-                                ADMIN_CHAT_ID,
-                                text,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True,
-                            )
+                            await send_order_message(bot, log, text)
 
                         offset = f.tell()
                         save_cursor(cursor_path, offset)
@@ -146,9 +171,11 @@ async def telegram_notifier(log):
 
             except asyncio.CancelledError:
                 raise
+
             except Exception:
                 log.exception("Telegram notifier error")
                 await asyncio.sleep(BOT_POLL_SEC)
+
     finally:
         await bot.session.close()
 
@@ -166,8 +193,10 @@ async def supervise_parser(runlog):
 
             try:
                 rc = await proc.wait()
+
             except asyncio.CancelledError:
                 raise
+
             finally:
                 try:
                     await pipe_task
@@ -177,6 +206,7 @@ async def supervise_parser(runlog):
             runlog.error("Parser subprocess exited. returncode=%s", rc)
 
             restarts += 1
+
             if restarts > MAX_RESTARTS:
                 runlog.error("Too many restarts (%d). Stop supervising parser.", restarts)
                 return
@@ -194,20 +224,25 @@ async def main():
 
     supervise_task = asyncio.create_task(supervise_parser(runlog))
     bot_task = asyncio.create_task(telegram_notifier(setup_logger("bot")))
+
     tasks = [supervise_task, bot_task]
 
     try:
         await asyncio.gather(*tasks)
+
     except KeyboardInterrupt:
         runlog.info("Stopped by user (Ctrl+C). Shutting down...")
+
     finally:
-        for t in tasks:
-            t.cancel()
+        for task in tasks:
+            task.cancel()
 
         global CURRENT_PARSER_PROC
+
         if CURRENT_PARSER_PROC and CURRENT_PARSER_PROC.returncode is None:
             runlog.info("Terminating parser subprocess...")
             CURRENT_PARSER_PROC.terminate()
+
             try:
                 await asyncio.wait_for(CURRENT_PARSER_PROC.wait(), timeout=5)
             except Exception:
