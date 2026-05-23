@@ -12,12 +12,15 @@ from aiogram.enums import ParseMode
 from config import Settings
 from tg_formatter import format_order
 from logger_setup import setup_logger
+from aiogram.client.session.aiohttp import AiohttpSession
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "socks5://127.0.0.1:10808").strip()
 
 PARSER_SCRIPT = "main.py"
 BOT_POLL_SEC = 3
@@ -96,7 +99,8 @@ async def telegram_notifier(log):
         log.error("ADMIN_CHAT_ID is missing/invalid in .env")
         return
 
-    bot = Bot(token=BOT_TOKEN)
+    session = AiohttpSession(proxy=TELEGRAM_PROXY)
+    bot = Bot(token=BOT_TOKEN, session=session)
     log.info("Telegram notifier started. poll=%ss", BOT_POLL_SEC)
 
     s = Settings()
