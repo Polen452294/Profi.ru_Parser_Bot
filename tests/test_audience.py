@@ -4,6 +4,8 @@ import tempfile
 import unittest
 
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import SendMessage
 
 from audience import TelegramAudience
 from config import Settings
@@ -15,6 +17,14 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text, kwargs))
+
+
+class FakeLog:
+    def __init__(self):
+        self.warnings = []
+
+    def warning(self, *args):
+        self.warnings.append(args)
 
 
 class AudienceTests(unittest.TestCase):
@@ -81,6 +91,33 @@ class AudienceTests(unittest.TestCase):
                     [chat_id for chat_id, _, _ in bot.messages],
                     [42, 99],
                 )
+
+        asyncio.run(scenario())
+
+    def test_network_failure_does_not_stop_notification_loop(self):
+        class FailingBot:
+            async def send_message(self, chat_id, text, **kwargs):
+                raise TelegramNetworkError(
+                    method=SendMessage(chat_id=chat_id, text=text),
+                    message="connection reset",
+                )
+
+        async def scenario():
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "BOT_TOKEN": "123:abc",
+                    "ADMIN_CHAT_ID": "42",
+                    "PROFI_LOGIN": "+79990000000",
+                },
+            )
+            log = FakeLog()
+            audience = TelegramAudience(settings, log)
+
+            delivered = await audience.send(FailingBot(), "test")
+
+            self.assertEqual(delivered, 0)
+            self.assertTrue(log.warnings)
 
         asyncio.run(scenario())
 

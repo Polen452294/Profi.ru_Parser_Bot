@@ -36,6 +36,25 @@ def _proxy_connection_error(settings: Settings, timeout: float = 3.0) -> str | N
         )
 
 
+async def _telegram_api_connection_error(settings: Settings) -> str | None:
+    """Проверяет не только порт прокси, но и реальный запрос к Telegram API."""
+    from aiogram import Bot
+    from aiogram.client.session.aiohttp import AiohttpSession
+
+    session = AiohttpSession(proxy=settings.telegram_proxy, timeout=10)
+    bot = Bot(token=settings.bot_token, session=session)
+    try:
+        await bot.get_me()
+        return None
+    except Exception as exc:
+        return (
+            "Telegram API недоступен через TELEGRAM_PROXY: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    finally:
+        await bot.session.close()
+
+
 def run_doctor(settings: Settings) -> int:
     errors = 0
     warnings = 0
@@ -130,15 +149,22 @@ def run_doctor(settings: Settings) -> int:
                 _print_check("ОШИБКА", proxy_error)
                 errors += 1
             else:
-                browser_route = (
-                    "Chromium/Profi.ru напрямую"
-                    if settings.profi_proxy is None
-                    else "Chromium/Profi.ru через прокси"
+                telegram_error = asyncio.run(
+                    _telegram_api_connection_error(settings)
                 )
-                _print_check(
-                    "OK",
-                    f"Прокси Telegram доступен; {browser_route}",
-                )
+                if telegram_error:
+                    _print_check("ОШИБКА", telegram_error)
+                    errors += 1
+                else:
+                    browser_route = (
+                        "Chromium/Profi.ru напрямую"
+                        if settings.profi_proxy is None
+                        else "Chromium/Profi.ru через прокси"
+                    )
+                    _print_check(
+                        "OK",
+                        f"Telegram API доступен через прокси; {browser_route}",
+                    )
 
     if settings.auth_state_path.exists():
         _print_check("OK", "Авторизация Profi.ru сохранена")
