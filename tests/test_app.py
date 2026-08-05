@@ -1,0 +1,77 @@
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from app import build_parser, command_filter, command_parser, command_run
+
+
+class AppTests(unittest.TestCase):
+    def test_cli_exposes_all_user_commands(self):
+        parser = build_parser()
+
+        for command in ("doctor", "run", "parser", "auth", "filter"):
+            with self.subTest(command=command):
+                arguments = parser.parse_args([command])
+                self.assertEqual(arguments.command, command)
+
+    def test_filter_command_explains_positive_match(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = command_filter(
+                "Нужно разработать Telegram-бота, бюджет 50 000 рублей"
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("ПОДХОДИТ", output.getvalue())
+        self.assertIn("бот", output.getvalue().lower())
+
+    def test_filter_command_explains_exclusion(self):
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = command_filter(
+                "Нужно разработать бота для таргетинга, бюджет 50 000 рублей"
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("НЕ ПОДХОДИТ", output.getvalue())
+        self.assertIn("таргет", output.getvalue())
+
+    def test_full_run_can_create_first_session_through_telegram(self):
+        settings = SimpleNamespace(auth_state_path=Path("missing-storage-state.json"))
+        fake_run = AsyncMock()
+        output = StringIO()
+
+        with (
+            patch("app._validate", return_value=True),
+            patch("app._runtime_preflight", return_value=True),
+            patch("run_all.run", fake_run),
+            redirect_stdout(output),
+        ):
+            exit_code = command_run(settings)
+
+        self.assertEqual(exit_code, 0)
+        fake_run.assert_awaited_once_with(settings)
+        self.assertIn("бот сам запросит SMS-код", output.getvalue())
+
+    def test_parser_only_requires_existing_session(self):
+        settings = SimpleNamespace(auth_state_path=Path("missing-storage-state.json"))
+        output = StringIO()
+
+        with (
+            patch("app._validate", return_value=True),
+            patch("app._runtime_preflight", return_value=True),
+            redirect_stdout(output),
+        ):
+            exit_code = command_parser(settings)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("режим без Telegram", output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

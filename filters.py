@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 import re
 
@@ -223,3 +224,79 @@ def order_matches_filter(data: Any) -> bool:
         return False
 
     return True
+
+
+@dataclass(frozen=True)
+class FilterRule:
+    phrase: str
+    group: str
+
+
+@dataclass(frozen=True)
+class FilterDecision:
+    accepted: bool
+    matched_rule: FilterRule | None = None
+    excluded_rule: FilterRule | None = None
+
+
+def evaluate_order(data: Any) -> FilterDecision:
+    """Объясняет решение фильтра, не изменяя исходные правила отбора."""
+    text = _normalize_text(_to_text(data))
+    if not text:
+        return FilterDecision(accepted=False)
+
+    target_match = next(
+        (match for pattern in TARGET_KEYWORD_PATTERNS if (match := pattern.search(text))),
+        None,
+    )
+    if target_match is None:
+        return FilterDecision(accepted=False)
+
+    matched_rule = FilterRule(target_match.group(0), "Целевая тематика")
+    if not _contains_dev_intent(text):
+        return FilterDecision(
+            accepted=False,
+            matched_rule=matched_rule,
+            excluded_rule=FilterRule(
+                "нет запроса на разработку или внедрение",
+                "Контекст заявки",
+            ),
+        )
+
+    disallowed_topic = next(
+        (keyword for keyword in DISALLOWED_TOPICS if keyword in text),
+        None,
+    )
+    if disallowed_topic:
+        return FilterDecision(
+            accepted=False,
+            matched_rule=matched_rule,
+            excluded_rule=FilterRule(disallowed_topic, "Исключённая тематика"),
+        )
+
+    platform_match = next(
+        (
+            match
+            for pattern in DISALLOWED_PLATFORM_PATTERNS
+            if (match := pattern.search(text))
+        ),
+        None,
+    )
+    if platform_match:
+        return FilterDecision(
+            accepted=False,
+            matched_rule=matched_rule,
+            excluded_rule=FilterRule(
+                platform_match.group(0),
+                "Исключённая платформа",
+            ),
+        )
+
+    if not _budget_matches(text):
+        return FilterDecision(
+            accepted=False,
+            matched_rule=matched_rule,
+            excluded_rule=FilterRule("бюджет ниже 10 000 ₽", "Бюджет"),
+        )
+
+    return FilterDecision(accepted=True, matched_rule=matched_rule)

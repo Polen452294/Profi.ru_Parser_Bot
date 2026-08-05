@@ -1,177 +1,262 @@
-import logging
-import os
-from datetime import datetime
+from __future__ import annotations
 
-from playwright.sync_api import TimeoutError as PWTimeoutError
-from playwright.sync_api import Error as PlaywrightError
+from contextlib import suppress
+from datetime import datetime
+import logging
+from pathlib import Path
+
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Error as PlaywrightError,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
+
+from config import Settings
 
 
 logger = logging.getLogger("parser.client")
 
 
-class ProfiClient:
-    def __init__(self, playwright, settings):
-        self.p = playwright
-        self.s = settings
+class BrowserUnavailableError(RuntimeError):
+    pass
 
-        self.browser = None
-        self.context = None
-        self.page = None
+
+class SiteResponseError(RuntimeError):
+    def __init__(self, status: int, retry_after: int | None = None):
+        self.status = status
+        self.retry_after = retry_after
+        self.screenshot_path: Path | None = None
+        super().__init__(f"Profi.ru вернул HTTP {status}")
+
+
+CHALLENGE_SELECTORS = (
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="hcaptcha"]',
+    'iframe[src*="challenges.cloudflare.com"]',
+    '[id*="captcha" i]',
+    '[class*="captcha" i]',
+    'input[name*="captcha" i]',
+)
+
+CHALLENGE_TEXT_MARKERS = (
+    "подтвердите, что вы не робот",
+    "докажите, что вы не робот",
+    "проверка безопасности",
+    "доступ временно ограничен",
+    "ваш доступ ограничен",
+    "verify you are human",
+    "checking your browser",
+    "unusual traffic",
+    "attention required!",
+    "just a moment...",
+)
+
+
+class ProfiClient:
+    def __init__(self, playwright: Playwright, settings: Settings):
+        self.playwright = playwright
+        self.settings = settings
+        self.browser: Browser | None = None
+        self.context: BrowserContext | None = None
+        self.page: Page | None = None
+        self._tracing_active = False
 
     def start(self) -> "ProfiClient":
-        if self.browser or self.context or self.page:
-            self.close()
+        self.close()
+        self.browser = self.playwright.chromium.launch(headless=self.settings.headless)
 
-        launch_args = [
-            "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--disable-dev-shm-usage",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-features=UseSkiaRenderer,Vulkan",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-        ]
+        context_options: dict[str, object] = {
+            "viewport": {"width": 1440, "height": 900},
+        }
+        if self.settings.auth_state_path.exists():
+            context_options["storage_state"] = str(self.settings.auth_state_path)
 
-        self.browser = self.p.chromium.launch(
-            headless=getattr(self.s, "headless", True),
-            args=launch_args,
-        )
-
-        storage_state = (
-            getattr(self.s, "auth_state_path", None)
-            or getattr(self.s, "storage_state_path", None)
-        )
-
-        if storage_state:
-            self.context = self.browser.new_context(
-                storage_state=storage_state,
-                viewport={"width": 1440, "height": 900},
+        self.context = self.browser.new_context(**context_options)
+        if self.settings.trace_on_failure:
+            self.context.tracing.start(
+                screenshots=True,
+                snapshots=True,
+                sources=False,
             )
-            logger.info("Context created. storage_state=%s", storage_state)
-        else:
-            self.context = self.browser.new_context(
-                viewport={"width": 1440, "height": 900},
-            )
-            logger.info("Context created. storage_state=None")
-
+            self._tracing_active = True
         self.page = self.context.new_page()
-        logger.info("Client page created. url=%s", self.page.url)
+        logger.info(
+            "Браузер запущен. headless=%s, сессия=%s",
+            self.settings.headless,
+            self.settings.auth_state_path.exists(),
+        )
         return self
 
-    def close(self):
-        try:
-            if self.page:
-                try:
-                    self.page.close()
-                except Exception:
-                    pass
-        finally:
+    def close(self) -> None:
+        if self.page is not None:
+            with suppress(Exception):
+                self.page.close()
             self.page = None
-
-        try:
-            if self.context:
-                try:
-                    self.context.close()
-                except Exception:
-                    pass
-        finally:
+        if self.context is not None:
+            if self._tracing_active:
+                with suppress(Exception):
+                    self.context.tracing.stop()
+                self._tracing_active = False
+            with suppress(Exception):
+                self.context.close()
             self.context = None
-
-        try:
-            if self.browser:
-                try:
-                    self.browser.close()
-                except Exception:
-                    pass
-        finally:
+        if self.browser is not None:
+            with suppress(Exception):
+                self.browser.close()
             self.browser = None
 
     def __enter__(self) -> "ProfiClient":
         return self.start()
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
 
-    def open_board(self):
-        url = getattr(self.s, "page_url", "https://profi.ru/backoffice/")
-        self.page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+    def _page(self) -> Page:
+        if self.page is None:
+            raise BrowserUnavailableError("Страница браузера ещё не открыта")
+        return self.page
 
-    def soft_refresh(self):
+    def open_board(self) -> None:
+        response = self._page().goto(
+            self.settings.page_url,
+            wait_until="domcontentloaded",
+            timeout=self.settings.page_timeout_ms,
+        )
+        self._check_response(response)
+
+    def soft_refresh(self) -> None:
         try:
-            self.page.reload(wait_until="domcontentloaded", timeout=90_000)
-            return
-        except PlaywrightError as e:
-            msg = str(e).lower()
-
-            if any(x in msg for x in (
-                "page crashed",
-                "target page, context or browser has been closed",
-                "browser has been closed",
-                "context has been closed",
-                "page has been closed",
-            )):
-                raise RuntimeError("PAGE_OR_BROWSER_CRASHED") from e
-
-            if any(x in msg for x in (
-                "err_name_not_resolved",
-                "err_internet_disconnected",
-                "net::err",
-            )):
-                url = getattr(self.s, "page_url", "https://profi.ru/backoffice/")
-                self.page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            response = self._page().reload(
+                wait_until="domcontentloaded",
+                timeout=self.settings.page_timeout_ms,
+            )
+            self._check_response(response)
+        except PlaywrightError as exc:
+            message = str(exc).lower()
+            if self._is_closed_error(message):
+                raise BrowserUnavailableError("Браузер или вкладка закрылись") from exc
+            if self._is_network_error(message):
+                self.open_board()
                 return
-
             raise
 
     def cards_locator(self):
-        return self.page.locator(self.s.card_selector)
+        return self._page().locator(self.settings.card_selector)
 
     def wait_cards(self) -> bool:
         try:
-            self.page.wait_for_selector(
-                self.s.card_selector,
-                timeout=self.s.selector_timeout_ms,
+            self._page().wait_for_selector(
+                self.settings.card_selector,
+                timeout=self.settings.selector_timeout_ms,
                 state="attached",
             )
             return True
-        except PWTimeoutError:
-            self.save_debug(prefix="no_cards")
+        except PlaywrightTimeoutError:
+            self.save_debug("no_cards")
             return False
-        except PlaywrightError as e:
-            msg = str(e).lower()
-            if any(x in msg for x in (
-                "page crashed",
-                "target page, context or browser has been closed",
-                "browser has been closed",
-                "context has been closed",
-                "page has been closed",
-            )):
-                raise RuntimeError("PAGE_OR_BROWSER_CRASHED") from e
+        except PlaywrightError as exc:
+            if self._is_closed_error(str(exc).lower()):
+                raise BrowserUnavailableError("Браузер или вкладка закрылись") from exc
             raise
 
-    def save_debug(self, prefix: str = "debug"):
-        debug_dir = getattr(self.s, "debug_dir", "logs/debug")
+    def detect_access_challenge(self) -> str | None:
+        page = self._page()
+        url = page.url.lower()
+        title = page.title().lower()
+
+        if "/captcha" in url or "/challenge" in url:
+            return f"Обнаружена challenge-страница: {page.url}"
+
+        for marker in CHALLENGE_TEXT_MARKERS:
+            if marker in title:
+                return f"Заголовок страницы содержит признак блокировки: {marker}"
+
+        for selector in CHALLENGE_SELECTORS:
+            try:
+                locator = page.locator(selector)
+                if locator.count() and locator.first.is_visible():
+                    return f"Обнаружен видимый элемент CAPTCHA: {selector}"
+            except PlaywrightError:
+                continue
+
         try:
-            os.makedirs(debug_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            png_path = os.path.join(debug_dir, f"{prefix}_{ts}.png")
-            html_path = os.path.join(debug_dir, f"{prefix}_{ts}.html")
+            body_text = page.locator("body").inner_text(timeout=3_000).lower()
+        except PlaywrightError:
+            return None
+        for marker in CHALLENGE_TEXT_MARKERS:
+            if marker in body_text:
+                return f"Страница содержит признак блокировки: {marker}"
+        return None
 
-            try:
-                if self.page:
-                    self.page.screenshot(path=png_path, full_page=True)
-            except Exception:
-                pass
+    def save_debug(self, prefix: str = "debug") -> tuple[Path, Path, Path | None]:
+        self.settings.debug_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        screenshot_path = self.settings.debug_dir / f"{prefix}_{timestamp}.png"
+        html_path = self.settings.debug_dir / f"{prefix}_{timestamp}.html"
+        trace_path = (
+            self.settings.debug_dir / f"{prefix}_{timestamp}.trace.zip"
+            if self.settings.trace_on_failure
+            else None
+        )
 
-            try:
-                if self.page:
-                    html = self.page.content()
-                    with open(html_path, "w", encoding="utf-8") as f:
-                        f.write(html)
-            except Exception:
-                pass
+        try:
+            page = self._page()
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            html_path.write_text(page.content(), encoding="utf-8")
+            screenshot_path.chmod(0o600)
+            html_path.chmod(0o600)
+            if trace_path is not None and self.context is not None:
+                if self._tracing_active:
+                    self.context.tracing.stop(path=str(trace_path))
+                    self._tracing_active = False
+                    trace_path.chmod(0o600)
+                self.context.tracing.start(
+                    screenshots=True,
+                    snapshots=True,
+                    sources=False,
+                )
+                self._tracing_active = True
+            logger.warning("Диагностика страницы сохранена в %s", self.settings.debug_dir)
         except Exception:
+            logger.exception("Не удалось сохранить диагностику страницы")
+        return screenshot_path, html_path, trace_path
+
+    @staticmethod
+    def _is_closed_error(message: str) -> bool:
+        markers = (
+            "page crashed",
+            "target page, context or browser has been closed",
+            "browser has been closed",
+            "context has been closed",
+            "page has been closed",
+        )
+        return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _is_network_error(message: str) -> bool:
+        markers = (
+            "err_name_not_resolved",
+            "err_internet_disconnected",
+            "net::err",
+        )
+        return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _check_response(response) -> None:
+        if response is None:
             return
+        status = response.status
+        if status not in {401, 403, 429} and status < 500:
+            return
+
+        retry_after = None
+        raw_retry_after = response.headers.get("retry-after")
+        if raw_retry_after:
+            try:
+                retry_after = max(0, int(raw_retry_after))
+            except ValueError:
+                pass
+        raise SiteResponseError(status, retry_after)

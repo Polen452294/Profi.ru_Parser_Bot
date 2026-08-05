@@ -1,36 +1,48 @@
-import html
+from __future__ import annotations
+
+from html import escape
 import re
-from html import escape as h
+from typing import Any
 
-def h(x):
-    return html.escape(str(x)) if x else ""
 
-def add_space_after_do(text: str) -> str:
-    return re.sub(r'до(?!\s)', 'до ', text)
+MAX_DESCRIPTION_LENGTH = 2_800
 
-def format_order(o: dict) -> str:
-    lines = [f"🧾 <b>Название:</b> {h(o['title'])}"]
 
-    if o.get("price"):
-        lines.append(add_space_after_do(f"💰 <b>Бюджет:</b> {h(o['price'])}"))
-    if o.get("description"):
-        text = o["description"]
-        if len(text) > 3000:
-            text = text[:3000] + "…"
-        lines.append("\n📝 <b>Описание:</b>")
-        lines.append(h(text))
+def _html(value: Any) -> str:
+    return escape(str(value), quote=True) if value not in (None, "") else ""
 
-    if o.get("href"):
-        url = o["href"]
+
+def _normalize_price(value: str) -> str:
+    return re.sub(r"\bдо(?=\d)", "до ", value, flags=re.IGNORECASE)
+
+
+def format_order(order: dict[str, Any]) -> str:
+    title = _html(order.get("title") or "Без названия")
+    lines = [f"🧾 <b>Заказ:</b> {title}"]
+
+    if price := order.get("price"):
+        lines.append(f"💰 <b>Бюджет:</b> {_html(_normalize_price(str(price)))}")
+
+    if description := order.get("description"):
+        description = str(description)
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            description = description[:MAX_DESCRIPTION_LENGTH].rstrip() + "…"
+        lines.extend(("", "📝 <b>Описание:</b>", _html(description)))
+
+    if location := order.get("location"):
+        lines.append(f"📍 <b>Место:</b> {_html(location)}")
+    if preferred_time := order.get("preferred_time"):
+        lines.append(f"🗓 <b>Когда удобно:</b> {_html(preferred_time)}")
+    if posted_ago := order.get("posted_ago"):
+        lines.append(f"⏱ <b>Опубликовано:</b> {_html(posted_ago)}")
+
+    if href := order.get("href"):
+        url = str(href)
         if url.startswith("/"):
             url = "https://profi.ru" + url
-        lines.append(f"🔗 <b>Ссылка:</b> {h(url)}")
+        lines.append(f'🔗 <a href="{_html(url)}">Открыть заказ на Profi.ru</a>')
 
-    if o.get("order_id"):
-        lines.append(f"🆔 <b>ID:</b> <code>{h(o['order_id'])}</code>")
-    if o.get("preferred_time"):
-        lines.append(f"🗓 <b>Когда удобно:</b> {h(o['preferred_time'])}")
-    if o.get("posted_ago"):
-        lines.append(f"⏱ <b>Опубликовано:</b> {h(o['posted_ago'])}")
+    if order_id := order.get("order_id"):
+        lines.append(f"🆔 <b>ID:</b> <code>{_html(order_id)}</code>")
 
     return "\n".join(lines)

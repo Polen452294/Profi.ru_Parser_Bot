@@ -1,65 +1,71 @@
+from __future__ import annotations
+
 import json
 import logging
-import os
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any
 
 
 def setup_logger(
     name: str,
-    log_dir: str = "logs",
+    log_dir: Path,
     level: int = logging.INFO,
-    max_bytes: int = 2_000_000,   # ~2MB
+    max_bytes: int = 2_000_000,
     backup_count: int = 5,
 ) -> logging.Logger:
-    os.makedirs(log_dir, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
 
-    # не плодим хэндлеры при повторном импорте
     if logger.handlers:
         return logger
 
-    fmt = logging.Formatter(
+    formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # console
-    sh = logging.StreamHandler()
-    sh.setLevel(level)
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
-    # all logs
-    fh = RotatingFileHandler(
-        os.path.join(log_dir, f"{name}.log"),
+    file_handler = RotatingFileHandler(
+        log_dir / f"{name}.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",
     )
-    fh.setLevel(level)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    (log_dir / f"{name}.log").chmod(0o600)
 
-    # error logs only
-    eh = RotatingFileHandler(
-        os.path.join(log_dir, f"{name}.error.log"),
+    error_handler = RotatingFileHandler(
+        log_dir / f"{name}.error.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",
     )
-    eh.setLevel(logging.ERROR)
-    eh.setFormatter(fmt)
-    logger.addHandler(eh)
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    logger.addHandler(error_handler)
+    (log_dir / f"{name}.error.log").chmod(0o600)
 
     return logger
 
 
-def log_json(logger: logging.Logger, prefix: str, payload: Dict[str, Any], level: int = logging.INFO) -> None:
+def log_json(
+    logger: logging.Logger,
+    prefix: str,
+    payload: dict[str, Any],
+    level: int = logging.INFO,
+) -> None:
     try:
-        logger.log(level, "%s | %s", prefix, json.dumps(payload, ensure_ascii=False))
-    except Exception:
-        logger.log(level, "%s | <json_dump_failed>", prefix)
+        serialized = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        serialized = "<не удалось преобразовать в JSON>"
+    logger.log(level, "%s | %s", prefix, serialized)

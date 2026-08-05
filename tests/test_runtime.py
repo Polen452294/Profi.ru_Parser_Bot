@@ -1,0 +1,93 @@
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from client import ProfiClient, SiteResponseError
+from config import Settings
+from main import failure_backoff_seconds
+from run_all import read_order_batch
+from tg_formatter import MAX_DESCRIPTION_LENGTH, format_order
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_failure_backoff_grows_and_is_capped(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "ERROR_BACKOFF_BASE_SEC": "60",
+                "ERROR_BACKOFF_MAX_SEC": "900",
+            },
+        )
+
+        with patch("main.random.uniform", return_value=0):
+            self.assertEqual(failure_backoff_seconds(settings, 1), 60)
+            self.assertEqual(failure_backoff_seconds(settings, 2), 120)
+            self.assertEqual(failure_backoff_seconds(settings, 99), 900)
+            self.assertEqual(failure_backoff_seconds(settings, 1, 600), 600)
+
+    def test_restricted_http_response_is_not_silently_ignored(self):
+        response = type(
+            "Response",
+            (),
+            {"status": 429, "headers": {"retry-after": "120"}},
+        )()
+
+        with self.assertRaises(SiteResponseError) as raised:
+            ProfiClient._check_response(response)
+
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.retry_after, 120)
+
+    def test_order_batch_tracks_each_line_and_skips_bad_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orders.jsonl"
+            path.write_text(
+                '{"order_id": "1"}\nnot-json\n[1, 2]\n{"order_id": "2"}\n',
+                encoding="utf-8",
+            )
+
+            records, normalized_offset = read_order_batch(path, 0)
+
+            self.assertEqual(normalized_offset, 0)
+            self.assertEqual([record for record, _ in records], [
+                {"order_id": "1"},
+                None,
+                None,
+                {"order_id": "2"},
+            ])
+            self.assertEqual(records[-1][1], path.stat().st_size)
+
+    def test_order_batch_resets_cursor_after_file_truncation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orders.jsonl"
+            path.write_text('{"order_id": "1"}\n', encoding="utf-8")
+
+            records, normalized_offset = read_order_batch(path, 10_000)
+
+            self.assertEqual(normalized_offset, 0)
+            self.assertEqual(records[0][0], {"order_id": "1"})
+
+    def test_formatter_escapes_html_and_builds_absolute_link(self):
+        message = format_order(
+            {
+                "title": "Крыша <срочно>",
+                "description": "Нужен мастер & помощник",
+                "href": "/orders/42",
+                "order_id": "42",
+            }
+        )
+
+        self.assertIn("Крыша &lt;срочно&gt;", message)
+        self.assertIn("мастер &amp; помощник", message)
+        self.assertIn('href="https://profi.ru/orders/42"', message)
+
+    def test_formatter_truncates_oversized_description(self):
+        message = format_order({"title": "Telegram-бот", "description": "x" * 5_000})
+
+        self.assertIn("x" * MAX_DESCRIPTION_LENGTH, message)
+        self.assertNotIn("x" * (MAX_DESCRIPTION_LENGTH + 1), message)
+
+
+if __name__ == "__main__":
+    unittest.main()

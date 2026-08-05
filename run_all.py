@@ -1,42 +1,73 @@
-import asyncio
-import os
-import sys
-import json
-from pathlib import Path
-from asyncio.subprocess import Process
+from __future__ import annotations
 
-from dotenv import load_dotenv
+import asyncio
+from asyncio.subprocess import Process
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any
+
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 
-from config import Settings
-from tg_formatter import format_order
+from audience import TelegramAudience
+from config import ConfigurationError, Settings
+from health import ACCESS_CHALLENGE_EXIT_CODE, SESSION_EXPIRED_EXIT_CODE
+from instance_lock import AlreadyRunningError, SingleInstanceLock
+from lifecycle import notify_service_started, notify_service_stopped
 from logger_setup import setup_logger
+from maintenance import maintenance_loop
+from runtime_control import ParserPauseControl
+from session_recovery import SessionRecoveryManager
+from storage import (
+    compact_jsonl_if_consumed,
+    load_cursor,
+    read_jsonl_batch,
+    save_cursor,
+)
+from telegram_control import (
+    notify_admin,
+    system_event_notifier,
+    telegram_command_polling,
+)
+from tg_formatter import format_order
+from watchdog import heartbeat_watchdog
 
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "socks5://127.0.0.1:10808").strip()
-
-PARSER_SCRIPT = "main.py"
-BOT_POLL_SEC = 3
-
-RESTART_DELAY_SEC = 10
-MAX_RESTARTS = 50
-
-CURRENT_PARSER_PROC: Process | None = None
+CURRENT_PARSER_PROCESS: Process | None = None
+PARSER_RESTART_REQUESTED = False
 
 
-async def start_parser_process(log) -> Process:
-    python_exe = sys.executable
+def read_order_batch(
+    path: Path,
+    offset: int,
+) -> tuple[list[tuple[dict[str, Any] | None, int]], int]:
+    """Совместимое имя для чтения очереди заказов."""
+    return read_jsonl_batch(path, offset)
 
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
+
+def request_parser_restart() -> None:
+    global PARSER_RESTART_REQUESTED
+    process = CURRENT_PARSER_PROCESS
+    if process is not None and process.returncode is None:
+        PARSER_RESTART_REQUESTED = True
+        process.terminate()
+
+
+def parser_pid() -> int | None:
+    process = CURRENT_PARSER_PROCESS
+    if process is None or process.returncode is not None:
+        return None
+    return process.pid
+
+
+async def start_parser_process(settings: Settings, log) -> Process:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
 
     for key in (
         "LD_PRELOAD",
@@ -45,216 +76,372 @@ async def start_parser_process(log) -> Process:
         "PROXYCHAINS_QUIET_MODE",
         "PROXYRESOLV_DNS",
     ):
-        env.pop(key, None)
+        environment.pop(key, None)
 
-    log.info("Starting parser subprocess WITHOUT proxychains: %s %s", python_exe, PARSER_SCRIPT)
-
-    proc = await asyncio.create_subprocess_exec(
-        python_exe,
-        PARSER_SCRIPT,
+    parser_script = settings.project_dir / "main.py"
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(parser_script),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        env=env,
+        cwd=str(settings.project_dir),
+        env=environment,
     )
 
-    global CURRENT_PARSER_PROC
-    CURRENT_PARSER_PROC = proc
-
-    log.info("Parser started. PID=%s", proc.pid)
-    return proc
-
-
-async def pipe_process_output(proc: Process, log):
-    assert proc.stdout is not None
-
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-
-        text = line.decode(errors="ignore").rstrip()
-        log.info("[PARSER] %s", text)
+    global CURRENT_PARSER_PROCESS
+    CURRENT_PARSER_PROCESS = process
+    log.info("Парсер запущен, PID=%s", process.pid)
+    return process
 
 
-def load_cursor(path: str) -> int:
-    p = Path(path)
+async def pipe_process_output(process: Process, log) -> None:
+    if process.stdout is None:
+        return
 
-    if not p.exists():
-        return 0
-
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return int(data.get("offset", 0))
-    except Exception:
-        return 0
+    while line := await process.stdout.readline():
+        log.info("[ПАРСЕР] %s", line.decode("utf-8", errors="replace").rstrip())
 
 
-def save_cursor(path: str, offset: int) -> None:
-    Path(path).write_text(
-        json.dumps({"offset": offset}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-async def send_order_message(bot: Bot, log, text: str) -> None:
+async def send_order_message(
+    bot: Bot,
+    settings: Settings,
+    log,
+    text: str,
+    audience: TelegramAudience,
+) -> bool:
     while True:
         try:
-            await bot.send_message(
-                ADMIN_CHAT_ID,
+            delivered = await audience.send(
+                bot,
                 text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
+            if delivered == 0:
+                return False
             await asyncio.sleep(1)
-            return
+            return True
+        except TelegramRetryAfter as exc:
+            log.warning("Лимит Telegram; повтор через %s сек.", exc.retry_after)
+            await asyncio.sleep(exc.retry_after + 2)
 
-        except TelegramRetryAfter as e:
-            log.warning("Telegram flood control. Sleeping %s seconds", e.retry_after)
-            await asyncio.sleep(e.retry_after + 2)
+
+async def order_notifier(
+    settings: Settings,
+    bot: Bot,
+    log,
+    audience: TelegramAudience | None = None,
+) -> None:
+    audience = audience or TelegramAudience(settings, log)
+    offset = load_cursor(settings.bot_cursor_path)
+
+    if offset == 0 and settings.orders_path.exists() and audience.has_recipients:
+        offset = settings.orders_path.stat().st_size
+        save_cursor(settings.bot_cursor_path, offset)
+        log.info("Существующие заявки пропущены; ожидаю новые")
+
+    log.info("Отправка заявок в Telegram запущена")
+    while True:
+        try:
+            if not audience.has_recipients:
+                log.info("Ожидаю первого получателя Telegram")
+                await audience.wait_until_available()
+            records, normalized_offset = read_jsonl_batch(settings.orders_path, offset)
+            if normalized_offset != offset:
+                offset = normalized_offset
+                save_cursor(settings.bot_cursor_path, offset)
+
+            for order, next_offset in records:
+                if order is None:
+                    log.warning("Пропущена повреждённая строка в файле заявок")
+                else:
+                    delivered = await send_order_message(
+                        bot,
+                        settings,
+                        log,
+                        format_order(order),
+                        audience,
+                    )
+                    if not delivered:
+                        log.warning("Заявка ожидает первого получателя Telegram")
+                        break
+                    log.info("Заявка отправлена: %s", order.get("order_id", "без ID"))
+
+                offset = next_offset
+                save_cursor(settings.bot_cursor_path, offset)
+
+            offset = compact_jsonl_if_consumed(
+                settings.orders_path,
+                settings.bot_cursor_path,
+                offset,
+                settings.queue_compact_bytes,
+            )
+
+            await asyncio.sleep(settings.bot_poll_sec)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Ошибка Telegram; повторяю через %s сек.", settings.bot_poll_sec)
+            await asyncio.sleep(settings.bot_poll_sec)
 
 
-async def telegram_notifier(log):
-    if not BOT_TOKEN:
-        log.error("BOT_TOKEN is missing in .env")
-        return
-
-    if ADMIN_CHAT_ID == 0:
-        log.error("ADMIN_CHAT_ID is missing/invalid in .env")
-        return
-
-    session = AiohttpSession(proxy=TELEGRAM_PROXY)
-    bot = Bot(token=BOT_TOKEN, session=session)
-
-    log.info("Telegram notifier started. poll=%ss proxy=%s", BOT_POLL_SEC, TELEGRAM_PROXY)
-
-    s = Settings()
-    orders_path = getattr(s, "out_jsonl_path", None) or getattr(s, "out_new_jsonl")
-    cursor_path = getattr(s, "bot_cursor_path", "bot_cursor.json")
-
-    orders_file = Path(orders_path)
-    offset = load_cursor(cursor_path)
-
-    if offset == 0 and orders_file.exists():
-        offset = orders_file.stat().st_size
-        save_cursor(cursor_path, offset)
-        log.info("Cursor initialized to end of orders file. offset=%s", offset)
+async def supervise_parser(
+    settings: Settings,
+    log,
+    bot: Bot,
+    recovery: SessionRecoveryManager,
+    audience: TelegramAudience,
+    control: ParserPauseControl,
+) -> None:
+    global CURRENT_PARSER_PROCESS, PARSER_RESTART_REQUESTED
+    restart_count = 0
+    crash_alert_sent = False
 
     try:
         while True:
+            parser_started_at = time.time()
+            process = await start_parser_process(settings, log)
+            output_task = asyncio.create_task(pipe_process_output(process, log))
             try:
-                if orders_file.exists():
-                    with orders_file.open("r", encoding="utf-8") as f:
-                        f.seek(offset)
-
-                        for line in f:
-                            line = line.strip()
-
-                            if not line:
-                                continue
-
-                            try:
-                                order = json.loads(line)
-                            except Exception:
-                                log.warning("Bad json line: %r", line[:200])
-                                continue
-
-                            if not isinstance(order, dict):
-                                continue
-
-                            text = format_order(order)
-                            await send_order_message(bot, log, text)
-
-                        offset = f.tell()
-                        save_cursor(cursor_path, offset)
-
-                await asyncio.sleep(BOT_POLL_SEC)
-
-            except asyncio.CancelledError:
-                raise
-
-            except Exception:
-                log.exception("Telegram notifier error")
-                await asyncio.sleep(BOT_POLL_SEC)
-
-    finally:
-        await bot.session.close()
-
-
-async def supervise_parser(runlog):
-    global CURRENT_PARSER_PROC
-    restarts = 0
-
-    try:
-        while True:
-            proc = await start_parser_process(runlog)
-            CURRENT_PARSER_PROC = proc
-
-            pipe_task = asyncio.create_task(pipe_process_output(proc, runlog))
-
-            try:
-                rc = await proc.wait()
-
-            except asyncio.CancelledError:
-                raise
-
+                return_code = await process.wait()
             finally:
-                try:
-                    await pipe_task
-                except asyncio.CancelledError:
-                    pass
+                await output_task
 
-            runlog.error("Parser subprocess exited. returncode=%s", rc)
+            if PARSER_RESTART_REQUESTED:
+                PARSER_RESTART_REQUESTED = False
+                restart_count = 0
+                log.info("Перезапуск после обновления сессии")
+                continue
 
-            restarts += 1
+            if return_code == SESSION_EXPIRED_EXIT_CODE:
+                restart_count = 0
+                log.warning("Парсер остановлен из-за завершения сессии Profi.ru")
+                await recovery.start(
+                    "Сайт завершил сессию или запросил повторный вход",
+                    bypass_cooldown=True,
+                )
+                await recovery.wait_until_ready()
+                log.info("Новая сессия готова; запускаю парсер")
+                continue
 
-            if restarts > MAX_RESTARTS:
-                runlog.error("Too many restarts (%d). Stop supervising parser.", restarts)
+            if return_code == ACCESS_CHALLENGE_EXIT_CODE:
+                restart_count = 0
+                reason = "Profi.ru показал CAPTCHA или страницу ограничения доступа"
+                control.pause(reason)
+                log.error("Парсер поставлен на безопасную паузу: %s", reason)
+                if not audience.has_recipients:
+                    await audience.wait_until_available()
+                screenshots = list(
+                    path
+                    for path in settings.debug_dir.glob("access_challenge_*.png")
+                    if path.stat().st_mtime >= parser_started_at - 1
+                )
+                screenshot = (
+                    max(screenshots, key=lambda path: path.stat().st_mtime)
+                    if screenshots
+                    else None
+                )
+                caption = (
+                    "🛑 Profi.ru показал CAPTCHA или ограничил доступ.\n\n"
+                    "Все запросы остановлены. Проверьте изображение и отправьте "
+                    "/resume, когда можно безопасно повторить проверку."
+                )
+                if screenshot is not None:
+                    await audience.send_photo(bot, str(screenshot), caption)
+                else:
+                    await audience.send(bot, caption)
+                await control.wait_for_resume()
+                await audience.send(
+                    bot,
+                    "▶️ Получена команда /resume. Возобновляю проверку Profi.ru.",
+                )
+                log.info("Безопасная пауза снята пользователем")
+                continue
+
+            if return_code == 0:
+                log.info("Парсер завершился без ошибки")
                 return
 
-            runlog.info("Restarting parser in %ss (restart #%d)...", RESTART_DELAY_SEC, restarts)
-            await asyncio.sleep(RESTART_DELAY_SEC)
+            restart_count += 1
+            log.error("Парсер завершился с кодом %s", return_code)
 
+            if restart_count >= settings.site_error_threshold and not crash_alert_sent:
+                crash_alert_sent = True
+                await notify_admin(
+                    bot,
+                    settings,
+                    "🚨 Парсер несколько раз завершился с ошибкой. "
+                    "Автоматические перезапуски продолжаются. Проверьте logs/run_all.error.log.",
+                    audience,
+                )
+
+            if restart_count > settings.max_restarts:
+                await notify_admin(
+                    bot,
+                    settings,
+                    "❌ Парсер остановлен: достигнут лимит автоматических перезапусков.",
+                    audience,
+                )
+                return
+
+            log.info(
+                "Перезапуск через %s сек. (%s/%s)",
+                min(
+                    settings.restart_delay_sec * (2 ** min(restart_count - 1, 8)),
+                    settings.error_backoff_max_sec,
+                ),
+                restart_count,
+                settings.max_restarts,
+            )
+            restart_delay = min(
+                settings.restart_delay_sec * (2 ** min(restart_count - 1, 8)),
+                settings.error_backoff_max_sec,
+            )
+            await asyncio.sleep(restart_delay)
     finally:
-        CURRENT_PARSER_PROC = None
+        CURRENT_PARSER_PROCESS = None
 
 
-async def main():
-    runlog = setup_logger("run_all")
-    runlog.info("run_all started: parser + telegram in one process.")
+def _create_bot(settings: Settings) -> Bot:
+    session = (
+        AiohttpSession(proxy=settings.telegram_proxy)
+        if settings.telegram_proxy
+        else AiohttpSession()
+    )
+    return Bot(token=settings.bot_token, session=session)
 
-    supervise_task = asyncio.create_task(supervise_parser(runlog))
-    bot_task = asyncio.create_task(telegram_notifier(setup_logger("bot")))
 
-    tasks = [supervise_task, bot_task]
+async def _run_service(settings: Settings) -> None:
+    settings.ensure_directories()
+    run_log = setup_logger("run_all", settings.log_dir)
+    bot_log = setup_logger("bot", settings.log_dir)
+    bot = _create_bot(settings)
+    audience = TelegramAudience(settings, bot_log)
+    control = ParserPauseControl()
+    recovery = SessionRecoveryManager(
+        settings,
+        bot,
+        bot_log,
+        on_success=request_parser_restart,
+        audience=audience,
+    )
+
+    lifecycle_task = asyncio.create_task(
+        notify_service_started(settings, bot, audience)
+    )
+    tasks = [
+        asyncio.create_task(
+            supervise_parser(settings, run_log, bot, recovery, audience, control)
+        ),
+        asyncio.create_task(order_notifier(settings, bot, bot_log, audience)),
+        asyncio.create_task(system_event_notifier(settings, bot, bot_log, audience)),
+        asyncio.create_task(
+            telegram_command_polling(
+                settings,
+                bot,
+                recovery,
+                bot_log,
+                audience,
+                control,
+            )
+        ),
+        asyncio.create_task(
+            heartbeat_watchdog(
+                settings,
+                bot,
+                audience,
+                recovery,
+                control,
+                bot_log,
+                parser_pid,
+            )
+        ),
+        asyncio.create_task(maintenance_loop(settings, run_log)),
+    ]
+    run_log.info("Парсер, уведомления и Telegram-команды запущены")
 
     try:
-        await asyncio.gather(*tasks)
-
-    except KeyboardInterrupt:
-        runlog.info("Stopped by user (Ctrl+C). Shutting down...")
-
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     finally:
         for task in tasks:
             task.cancel()
+        lifecycle_task.cancel()
 
-        global CURRENT_PARSER_PROC
+        await recovery.stop()
 
-        if CURRENT_PARSER_PROC and CURRENT_PARSER_PROC.returncode is None:
-            runlog.info("Terminating parser subprocess...")
-            CURRENT_PARSER_PROC.terminate()
-
+        global CURRENT_PARSER_PROCESS
+        process = CURRENT_PARSER_PROCESS
+        if process is not None and process.returncode is None:
+            run_log.info("Останавливаю процесс парсера")
+            process.terminate()
             try:
-                await asyncio.wait_for(CURRENT_PARSER_PROC.wait(), timeout=5)
-            except Exception:
-                runlog.warning("Killing parser subprocess...")
-                CURRENT_PARSER_PROC.kill()
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
 
         await asyncio.gather(*tasks, return_exceptions=True)
-        runlog.info("Shutdown complete.")
+        await asyncio.gather(lifecycle_task, return_exceptions=True)
+        try:
+            await notify_service_stopped(bot, audience)
+        except Exception:
+            bot_log.exception("Не удалось отправить уведомление об остановке")
+        await bot.session.close()
+        run_log.info("Работа завершена")
+
+
+async def run(settings: Settings) -> None:
+    settings.ensure_directories()
+    with SingleInstanceLock(settings.instance_lock_path):
+        await _run_service(settings)
+
+
+async def run_telegram_only(settings: Settings) -> None:
+    settings.ensure_directories()
+    with SingleInstanceLock(settings.instance_lock_path):
+        log = setup_logger("bot", settings.log_dir)
+        bot = _create_bot(settings)
+        audience = TelegramAudience(settings, log)
+        recovery = SessionRecoveryManager(settings, bot, log, audience=audience)
+        tasks = [
+            asyncio.create_task(order_notifier(settings, bot, log, audience)),
+            asyncio.create_task(system_event_notifier(settings, bot, log, audience)),
+            asyncio.create_task(
+                telegram_command_polling(settings, bot, recovery, log, audience)
+            ),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await recovery.stop()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await bot.session.close()
+
+
+def main() -> int:
+    try:
+        settings = Settings.load()
+        errors = settings.validation_errors(require_telegram=True)
+        if errors:
+            for error in errors:
+                print(f"ОШИБКА: {error}")
+            return 2
+        asyncio.run(run(settings))
+        return 0
+    except ConfigurationError as exc:
+        print(f"ОШИБКА НАСТРОЕК: {exc}")
+        return 2
+    except AlreadyRunningError as exc:
+        print(f"ОШИБКА: {exc}")
+        return 3
+    except KeyboardInterrupt:
+        print("\nРабота остановлена пользователем.")
+        return 0
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    raise SystemExit(main())
