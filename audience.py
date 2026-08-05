@@ -5,7 +5,11 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.enums import ChatType
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 from aiogram.types import FSInputFile
 
 from config import Settings
@@ -70,6 +74,19 @@ class TelegramAudience:
                 self.unregister(chat_id)
                 if self.log is not None:
                     self.log.warning("Telegram-пользователь %s заблокировал бота", chat_id)
+            except TelegramRetryAfter as exc:
+                if self.log is not None:
+                    self.log.warning(
+                        "Telegram ограничил отправку в чат %s; повтор возможен через %s сек.",
+                        chat_id,
+                        exc.retry_after,
+                    )
+            except TelegramNetworkError as exc:
+                if self.log is not None:
+                    self.log.warning(
+                        "Не удалось отправить сообщение в Telegram через сеть/прокси: %s",
+                        exc,
+                    )
         return delivered
 
     async def send_photo(self, bot: Bot, path: str, caption: str) -> int:
@@ -86,4 +103,17 @@ class TelegramAudience:
                 self.unregister(chat_id)
                 if self.log is not None:
                     self.log.warning("Telegram-пользователь %s заблокировал бота", chat_id)
+            except TelegramRetryAfter as exc:
+                if self.log is not None:
+                    self.log.warning(
+                        "Telegram ограничил отправку фото в чат %s; повтор через %s сек.",
+                        chat_id,
+                        exc.retry_after,
+                    )
+            except TelegramNetworkError as exc:
+                if self.log is not None:
+                    self.log.warning(
+                        "Не удалось отправить фото в Telegram через сеть/прокси: %s",
+                        exc,
+                    )
         return delivered

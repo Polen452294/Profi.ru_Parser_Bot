@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
@@ -167,31 +168,59 @@ async def telegram_command_polling(
     control: ParserPauseControl | None = None,
 ) -> None:
     audience = audience or TelegramAudience(settings, log)
-    dispatcher = build_dispatcher(settings, recovery, audience, control)
-    await bot.set_my_commands(
-        [
-            BotCommand(command="status", description="состояние парсера и сессии"),
-            BotCommand(command="health", description="полная диагностика сервиса"),
-            BotCommand(command="version", description="версия проекта"),
-            BotCommand(command="renew", description="перевыпустить cookies через SMS"),
-            BotCommand(command="cancel", description="отменить восстановление сессии"),
-            BotCommand(command="resume", description="продолжить после блокировки"),
-            BotCommand(command="help", description="справка по командам"),
-        ]
-    )
     if audience.open_mode:
         log.warning(
             "ADMIN_CHAT_ID не задан: бот доступен любому пользователю в личном чате"
         )
     else:
         log.info("Telegram-команды доступны только ADMIN_CHAT_ID")
-    log.info("Приём команд Telegram запущен")
-    await dispatcher.start_polling(
-        bot,
-        handle_signals=False,
-        close_bot_session=False,
-        allowed_updates=dispatcher.resolve_used_update_types(),
-    )
+
+    retry_delay = 5
+    while True:
+        dispatcher = build_dispatcher(settings, recovery, audience, control)
+        try:
+            await bot.set_my_commands(
+                [
+                    BotCommand(command="status", description="состояние парсера и сессии"),
+                    BotCommand(command="health", description="полная диагностика сервиса"),
+                    BotCommand(command="version", description="версия проекта"),
+                    BotCommand(command="renew", description="перевыпустить cookies через SMS"),
+                    BotCommand(command="cancel", description="отменить восстановление сессии"),
+                    BotCommand(command="resume", description="продолжить после блокировки"),
+                    BotCommand(command="help", description="справка по командам"),
+                ]
+            )
+            log.info("Приём команд Telegram запущен")
+            retry_delay = 5
+            await dispatcher.start_polling(
+                bot,
+                handle_signals=False,
+                close_bot_session=False,
+                allowed_updates=dispatcher.resolve_used_update_types(),
+            )
+            log.warning("Telegram polling завершился; запускаю его повторно")
+        except asyncio.CancelledError:
+            raise
+        except TelegramRetryAfter as exc:
+            retry_delay = max(retry_delay, int(exc.retry_after) + 2)
+            log.warning(
+                "Telegram временно ограничил запросы; повтор через %s сек.",
+                retry_delay,
+            )
+        except TelegramNetworkError as exc:
+            log.warning(
+                "Telegram недоступен через сеть/прокси: %s. Повтор через %s сек.",
+                exc,
+                retry_delay,
+            )
+        except Exception:
+            log.exception(
+                "Неожиданная ошибка Telegram polling; повтор через %s сек.",
+                retry_delay,
+            )
+
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 60)
 
 
 def _format_system_event(event: dict[str, Any]) -> str | None:

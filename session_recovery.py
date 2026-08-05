@@ -386,6 +386,18 @@ class SessionRecoveryManager:
     async def _send(self, text: str) -> int:
         return await self.audience.send(self.bot, text)
 
+    async def _send_required(self, text: str) -> None:
+        """Не начинает SMS-вход, пока Telegram недоступен пользователю."""
+        while True:
+            if not self.audience.has_recipients:
+                await self.audience.wait_until_available()
+            if await self._send(text):
+                return
+            self.log.warning(
+                "Telegram недоступен; откладываю запрос SMS-кода на 5 секунд"
+            )
+            await asyncio.sleep(5)
+
     def _clear_code_queue(self) -> None:
         while True:
             try:
@@ -445,7 +457,7 @@ class SessionRecoveryManager:
                 "Ожидаю первого пользователя Telegram перед запросом SMS-кода"
             )
             await self.audience.wait_until_available()
-        await self._send(
+        await self._send_required(
             "🔐 Сессия Profi.ru требует обновления.\n"
             f"Причина: {reason}\n\n"
             "Запрашиваю новый SMS-код автоматически…"
@@ -532,5 +544,14 @@ class SessionRecoveryManager:
     async def stop(self) -> None:
         await self.cancel()
         if self._task is not None:
-            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            try:
                 await asyncio.wait_for(self._task, timeout=10)
+            except asyncio.TimeoutError:
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.log.exception(
+                    "Ошибка завершения процедуры восстановления сессии"
+                )
