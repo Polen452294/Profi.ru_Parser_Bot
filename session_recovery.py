@@ -19,6 +19,14 @@ from config import Settings
 
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
+SMS_LOGIN_METHOD_PATTERN = re.compile(
+    r"войти\s+по\s+сим.{0,3}пушу\s+или\s+смс",
+    re.IGNORECASE,
+)
+OTHER_LOGIN_METHOD_PATTERN = re.compile(
+    r"выбрать\s+другой\s+способ",
+    re.IGNORECASE,
+)
 
 
 class SessionRecoveryError(RuntimeError):
@@ -92,6 +100,67 @@ def _find_sms_code_root(page, selector: str):
                 return root
         except PlaywrightError:
             continue
+    return None
+
+
+def _page_roots(page) -> list:
+    roots = [page]
+    roots.extend(
+        frame
+        for frame in getattr(page, "frames", [])
+        if frame is not getattr(page, "main_frame", None)
+    )
+    return roots
+
+
+def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
+    for root in _page_roots(page):
+        try:
+            matches = root.get_by_text(pattern)
+            for index in range(matches.count()):
+                match = matches.nth(index)
+                if match.is_visible():
+                    match.click()
+                    return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def _choose_sms_login_method(page, timeout_ms: int) -> None:
+    """Переключает авторизацию с МТС ID на штатный вход Profi.ru по SMS."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    other_method_opened = False
+
+    while time.monotonic() < deadline:
+        if _click_visible_text(page, SMS_LOGIN_METHOD_PATTERN):
+            return
+        if not other_method_opened and _click_visible_text(
+            page,
+            OTHER_LOGIN_METHOD_PATTERN,
+        ):
+            other_method_opened = True
+        time.sleep(0.25)
+
+    raise SessionRecoveryError(
+        "Не удалось выбрать «Войти по сим-пушу или СМС». "
+        "Возможно, Profi.ru изменил список способов входа."
+    )
+
+
+def _visible_login_form(page):
+    try:
+        login_input = page.get_by_test_id("auth_login_input")
+        login_button = page.get_by_test_id("enter_with_sms_btn")
+        if (
+            login_input.count() == 1
+            and login_button.count() == 1
+            and login_input.is_visible()
+            and login_button.is_visible()
+        ):
+            return login_input, login_button
+    except PlaywrightError:
+        pass
     return None
 
 
@@ -181,6 +250,23 @@ def recreate_profi_session(
             phase = "отправка номера телефона"
             login_input.fill(settings.profi_login)
             login_button.click()
+
+            phase = "выбор входа по сим-пушу или СМС"
+            _choose_sms_login_method(
+                page,
+                min(settings.page_timeout_ms, 30_000),
+            )
+
+            # После выхода из МТС ID сайт иногда возвращает штатную форму Profi.ru
+            # и просит подтвердить номер ещё раз. Повторяем ввод только если форма
+            # действительно видима, чтобы не создавать второй SMS-запрос.
+            time.sleep(0.5)
+            repeated_login_form = _visible_login_form(page)
+            if repeated_login_form is not None:
+                phase = "повторная отправка номера после выбора способа входа"
+                repeated_login_input, repeated_login_button = repeated_login_form
+                repeated_login_input.fill(settings.profi_login)
+                repeated_login_button.click()
 
             # SMS часто приходит раньше, чем поле кода становится видимым.
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
@@ -342,7 +428,8 @@ class SessionRecoveryManager:
         await self._send(
             "📲 Запрос SMS отправлен в Profi.ru. Как только код придёт, "
             "отправьте боту только его цифры "
-            f"в течение {self.settings.sms_code_timeout_sec // 60} мин.\n\n"
+            f"в течение {self.settings.sms_code_timeout_sec // 60} мин. "
+            "Если пришло несколько сообщений, отправьте самый последний код.\n\n"
             "Для отмены используйте /cancel."
         )
 

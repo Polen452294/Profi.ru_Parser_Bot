@@ -72,24 +72,37 @@ class RecoveryTests(unittest.TestCase):
         events = []
 
         class Element:
+            def __init__(self, page=None, kind="input"):
+                self.page = page
+                self.kind = kind
+
             def count(self):
                 return 1
 
             def is_visible(self):
+                if self.kind == "login" and self.page.method_selected:
+                    return False
                 return True
 
             def fill(self, value):
                 events.append(("fill", value))
 
             def click(self):
-                events.append("login_click")
+                if self.kind == "method":
+                    self.page.method_selected = True
+                    events.append("sms_method_click")
+                elif self.kind == "other_method":
+                    self.page.other_method_opened = True
+                    events.append("other_method_click")
+                else:
+                    events.append("login_click")
 
             def press(self, key):
                 events.append(("press", key))
 
         class Inputs:
-            def __init__(self):
-                self.element = Element()
+            def __init__(self, element=None):
+                self.element = element or Element()
 
             def count(self):
                 return 1
@@ -98,17 +111,39 @@ class RecoveryTests(unittest.TestCase):
                 return self.element
 
         class Page:
+            def __init__(self):
+                self.method_selected = False
+                self.other_method_opened = False
+
             def goto(self, *args, **kwargs):
                 events.append("goto")
 
             def get_by_test_id(self, test_id):
-                return Element()
+                return Element(self, "login")
+
+            def get_by_text(self, pattern):
+                if (
+                    "войти" in pattern.pattern
+                    and self.other_method_opened
+                    and not self.method_selected
+                ):
+                    return Inputs(Element(self, "method"))
+                if "выбрать" in pattern.pattern and not self.other_method_opened:
+                    return Inputs(Element(self, "other_method"))
+                return EmptyInputs()
 
             def wait_for_selector(self, selector, **kwargs):
                 events.append(("wait", selector))
 
             def locator(self, selector):
                 return Inputs()
+
+        class EmptyInputs:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                raise IndexError(index)
 
         class Context:
             def new_page(self):
@@ -166,6 +201,8 @@ class RecoveryTests(unittest.TestCase):
                 recreate_profi_session(settings, provide_code, announce)
 
         self.assertLess(events.index("login_click"), events.index("announce"))
+        self.assertLess(events.index("other_method_click"), events.index("sms_method_click"))
+        self.assertLess(events.index("sms_method_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
         self.assertLess(events.index("code"), events.index(("fill", "8796")))
 
