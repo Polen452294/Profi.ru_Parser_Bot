@@ -100,6 +100,9 @@ Chromium и браузер восстановления сессии. Адрес
 Если через прокси Telegram работает, но форма входа Profi.ru зависает на
 индикаторе загрузки, добавьте `PROFI_PROXY=direct`: бот продолжит работать
 через `TELEGRAM_PROXY`, а Chromium будет подключаться к Profi.ru напрямую.
+Если проверка через `socks5h://` обрывается, а через обычный `socks5://`
+работает, задайте `TELEGRAM_PROXY_RDNS=false` — Telegram останется на SOCKS,
+но DNS-имя будет разрешать Raspberry Pi.
 
 `bash check.sh` проверяет, что указанный адрес и порт прокси действительно
 доступны, а затем выполняет реальный запрос к Telegram API через этот прокси.
@@ -324,6 +327,7 @@ backups/
 | `ADMIN_CHAT_ID` | пусто | ID разрешённого чата; пусто — открытый режим |
 | `PROFI_LOGIN` | — | телефон или логин Profi.ru |
 | `TELEGRAM_PROXY` | пусто | общий HTTP/SOCKS-прокси для Telegram и Chromium/Profi.ru |
+| `TELEGRAM_PROXY_RDNS` | `true` | где разрешать DNS для SOCKS: на прокси или локально |
 | `PROFI_PROXY` | значение `TELEGRAM_PROXY` | отдельный прокси Chromium; `direct` — подключаться к Profi.ru напрямую |
 | `PROFI_PAGE_URL` | `https://profi.ru/backoffice/` | страница заказов |
 | `HEADLESS` | `true` | запускать основной Chromium без окна |

@@ -9,7 +9,6 @@ import time
 from typing import Any
 
 from aiogram import Bot
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 
@@ -33,6 +32,7 @@ from telegram_control import (
     system_event_notifier,
     telegram_command_polling,
 )
+from telegram_transport import create_telegram_session
 from tg_formatter import format_order
 from watchdog import heartbeat_watchdog
 
@@ -303,11 +303,7 @@ async def supervise_parser(
 
 
 def _create_bot(settings: Settings) -> Bot:
-    session = (
-        AiohttpSession(proxy=settings.telegram_proxy)
-        if settings.telegram_proxy
-        else AiohttpSession()
-    )
+    session = create_telegram_session(settings)
     return Bot(token=settings.bot_token, session=session)
 
 

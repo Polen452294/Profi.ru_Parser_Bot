@@ -8,6 +8,7 @@ import socket
 import sys
 
 from config import ConfigurationError, DEFAULT_ENV_FILE, Settings
+from telegram_transport import create_telegram_session
 from version import APP_VERSION
 
 
@@ -39,9 +40,7 @@ def _proxy_connection_error(settings: Settings, timeout: float = 3.0) -> str | N
 async def _telegram_api_connection_error(settings: Settings) -> str | None:
     """Проверяет не только порт прокси, но и реальный запрос к Telegram API."""
     from aiogram import Bot
-    from aiogram.client.session.aiohttp import AiohttpSession
-
-    session = AiohttpSession(proxy=settings.telegram_proxy, timeout=30)
+    session = create_telegram_session(settings, timeout=30)
     bot = Bot(token=settings.bot_token, session=session)
     try:
         await bot.get_me()

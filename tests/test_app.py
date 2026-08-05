@@ -33,17 +33,14 @@ class AppTests(unittest.TestCase):
         bot.session = session
 
         with (
-            patch(
-                "aiogram.client.session.aiohttp.AiohttpSession",
-                return_value=session,
-            ) as session_class,
+            patch("app.create_telegram_session", return_value=session) as session_class,
             patch("aiogram.Bot", return_value=bot),
         ):
             error = asyncio.run(_telegram_api_connection_error(settings))
 
         self.assertIsNone(error)
         session_class.assert_called_once_with(
-            proxy="socks5://127.0.0.1:20808",
+            settings,
             timeout=30,
         )
         session.close.assert_awaited_once()

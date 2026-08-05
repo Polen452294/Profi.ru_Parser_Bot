@@ -141,6 +141,7 @@ class Settings:
     bot_token: str
     admin_chat_id: int | None
     telegram_proxy: str | None
+    telegram_proxy_rdns: bool
     profi_proxy: str | None
     bot_poll_sec: int
     restart_delay_sec: int
@@ -300,6 +301,11 @@ class Settings:
             bot_token=values.get("BOT_TOKEN", "").strip(),
             admin_chat_id=_parse_optional_int(values, "ADMIN_CHAT_ID"),
             telegram_proxy=proxy,
+            telegram_proxy_rdns=_parse_bool(
+                values,
+                "TELEGRAM_PROXY_RDNS",
+                True,
+            ),
             profi_proxy=profi_proxy,
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),

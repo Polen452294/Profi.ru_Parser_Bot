@@ -77,6 +77,17 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.profi_proxy)
         self.assertIsNone(settings.playwright_proxy)
 
+    def test_telegram_proxy_can_use_local_dns(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "TELEGRAM_PROXY": "socks5://127.0.0.1:20808",
+                "TELEGRAM_PROXY_RDNS": "false",
+            },
+        )
+
+        self.assertFalse(settings.telegram_proxy_rdns)
+
     def test_profi_proxy_can_override_telegram_proxy(self):
         settings = Settings.load(
             env_file=None,
