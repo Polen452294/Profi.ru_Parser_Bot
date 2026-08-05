@@ -11,6 +11,68 @@ from tg_formatter import MAX_DESCRIPTION_LENGTH, format_order
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_main_browser_receives_shared_proxy(self):
+        class FakeTracing:
+            def start(self, **kwargs):
+                return None
+
+            def stop(self, **kwargs):
+                return None
+
+        class FakePage:
+            def close(self):
+                return None
+
+        class FakeContext:
+            tracing = FakeTracing()
+
+            def new_page(self):
+                return FakePage()
+
+            def close(self):
+                return None
+
+        class FakeBrowser:
+            def new_context(self, **kwargs):
+                return FakeContext()
+
+            def close(self):
+                return None
+
+        class FakeChromium:
+            def __init__(self):
+                self.launch_options = None
+
+            def launch(self, **kwargs):
+                self.launch_options = kwargs
+                return FakeBrowser()
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": str(Path(directory) / "data"),
+                    "LOG_DIR": str(Path(directory) / "logs"),
+                    "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
+                    "TRACE_ON_FAILURE": "false",
+                },
+            )
+            playwright = FakePlaywright()
+
+            with ProfiClient(playwright, settings):
+                pass
+
+        self.assertEqual(
+            playwright.chromium.launch_options,
+            {
+                "headless": True,
+                "proxy": {"server": "socks5://127.0.0.1:10808"},
+            },
+        )
+
     def test_failure_backoff_grows_and_is_capped(self):
         settings = Settings.load(
             env_file=None,

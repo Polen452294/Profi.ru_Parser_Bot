@@ -11,7 +11,9 @@ def authorize(playwright: Playwright, settings: Settings, *, force: bool = False
         return False
 
     settings.ensure_directories()
-    browser = playwright.chromium.launch(headless=False)
+    browser = playwright.chromium.launch(
+        **settings.playwright_launch_options(headless=False)
+    )
 
     try:
         context = browser.new_context(viewport={"width": 1440, "height": 900})

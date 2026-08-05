@@ -63,6 +63,7 @@ def build_health_report(
         f"🩺 Состояние сервиса v{APP_VERSION}\n\n"
         f"Telegram: ✅ команда получена\n"
         f"Chromium: {'✅ установлен' if chromium_installed() else '❌ не найден'}\n"
+        f"Прокси: {'✅ Telegram и Profi.ru' if settings.telegram_proxy else 'прямое подключение'}\n"
         f"Cookies: {'✅ есть' if settings.auth_state_path.exists() else '⚠️ отсутствуют'}\n"
         f"Парсер: {parser_state}\n"
         f"Heartbeat: {_age_text(alive_at)}\n"

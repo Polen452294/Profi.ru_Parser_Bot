@@ -38,6 +38,47 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "POLL_BASE_SEC"):
             Settings.load(env_file=None, values={"POLL_BASE_SEC": "быстро"})
 
+    def test_proxy_is_shared_with_playwright(self):
+        settings = Settings.load(
+            env_file=None,
+            values={"TELEGRAM_PROXY": "socks5://127.0.0.1:10808"},
+        )
+
+        self.assertEqual(
+            settings.playwright_proxy,
+            {"server": "socks5://127.0.0.1:10808"},
+        )
+
+    def test_authenticated_proxy_is_converted_for_playwright(self):
+        settings = Settings.load(
+            env_file=None,
+            values={"TELEGRAM_PROXY": "http://user:p%40ss@proxy.local:3128"},
+        )
+
+        self.assertEqual(
+            settings.playwright_proxy,
+            {
+                "server": "http://proxy.local:3128",
+                "username": "user",
+                "password": "p@ss",
+            },
+        )
+
+    def test_invalid_proxy_is_rejected_early(self):
+        invalid_values = (
+            "127.0.0.1:10808",
+            "ftp://127.0.0.1:10808",
+            "socks5://127.0.0.1",
+            "socks5://127.0.0.1:10808/path",
+        )
+        for proxy in invalid_values:
+            with self.subTest(proxy=proxy):
+                with self.assertRaisesRegex(ConfigurationError, "TELEGRAM_PROXY"):
+                    Settings.load(
+                        env_file=None,
+                        values={"TELEGRAM_PROXY": proxy},
+                    )
+
     def test_telegram_settings_are_validated_only_when_required(self):
         settings = Settings.load(env_file=None, values={})
 

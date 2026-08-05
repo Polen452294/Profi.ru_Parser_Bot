@@ -101,11 +101,14 @@ def run_doctor(settings: Settings) -> int:
     if settings.telegram_proxy:
         try:
             __import__("aiohttp_socks")
-            _print_check("OK", "Поддержка Telegram-прокси установлена")
+            _print_check(
+                "OK",
+                "Общий прокси для Telegram и Chromium/Profi.ru настроен",
+            )
         except ImportError:
             _print_check(
                 "ОШИБКА",
-                "Для TELEGRAM_PROXY требуется пакет aiohttp-socks; "
+                "Для общего TELEGRAM_PROXY требуется пакет aiohttp-socks; "
                 f"повторите {INSTALL_COMMAND}",
             )
             errors += 1

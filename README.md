@@ -85,14 +85,17 @@ SESSION_RECOVERY_ENABLED=true
 SESSION_RECOVERY_HEADLESS=true
 ```
 
-Если сервер подключается к Telegram через прокси:
+Если сервер должен подключаться к Telegram и Profi.ru через общий прокси:
 
 ```dotenv
 TELEGRAM_PROXY=socks5://127.0.0.1:10808
 ```
 
-Иначе оставьте `TELEGRAM_PROXY=` пустым. Никому не передавайте `.env`: в нём
-находится секретный токен Telegram-бота.
+При заполненном `TELEGRAM_PROXY` через него работают Telegram, основной
+Chromium и браузер восстановления сессии. Адрес `127.0.0.1:10808` подходит
+только тогда, когда SOCKS5-сервис запущен на этом же сервере. Иначе оставьте
+`TELEGRAM_PROXY=` пустым. Никому не передавайте `.env`: в нём находится
+секретный токен Telegram-бота.
 
 ### 4. Проверьте установку
 
@@ -300,7 +303,7 @@ backups/
 | `BOT_TOKEN` | — | токен Telegram-бота |
 | `ADMIN_CHAT_ID` | пусто | ID разрешённого чата; пусто — открытый режим |
 | `PROFI_LOGIN` | — | телефон или логин Profi.ru |
-| `TELEGRAM_PROXY` | пусто | необязательный HTTP/SOCKS-прокси |
+| `TELEGRAM_PROXY` | пусто | общий HTTP/SOCKS-прокси для Telegram и Chromium/Profi.ru |
 | `PROFI_PAGE_URL` | `https://profi.ru/backoffice/` | страница заказов |
 | `HEADLESS` | `true` | запускать основной Chromium без окна |
 | `POLL_BASE_SEC` | `90` | минимальная пауза между проверками |
@@ -338,7 +341,7 @@ tail -n 100 logs/run_all.error.log
 .venv/bin/python audit_dependencies.py
 ```
 
-Если Telegram недоступен, проверьте исходящее соединение сервера и значение
+Если Telegram или Profi.ru недоступны, проверьте общий прокси и значение
 `TELEGRAM_PROXY`. Если сайт изменил форму входа, отправьте `/renew`, затем
 посмотрите `logs/debug/session_recovery_failed.png`.
 

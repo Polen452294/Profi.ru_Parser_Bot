@@ -79,7 +79,11 @@ def recreate_profi_session(
         temporary_state.unlink()
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=settings.session_recovery_headless)
+        browser = playwright.chromium.launch(
+            **settings.playwright_launch_options(
+                headless=settings.session_recovery_headless,
+            )
+        )
         context = browser.new_context(viewport={"width": 1440, "height": 900})
         page = context.new_page()
 

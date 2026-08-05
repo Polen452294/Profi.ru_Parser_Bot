@@ -5,6 +5,7 @@ import os
 from os import environ
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
@@ -71,6 +72,29 @@ def _resolve_path(project_dir: Path, raw_value: str) -> Path:
     if not path.is_absolute():
         path = project_dir / path
     return path.resolve()
+
+
+def _parse_proxy_url(values: Mapping[str, str], name: str) -> str | None:
+    raw_value = values.get(name, "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        parsed = urlsplit(raw_value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError(f"{name}: некорректный адрес прокси") from exc
+
+    if parsed.scheme.lower() not in {"http", "https", "socks4", "socks5"}:
+        raise ConfigurationError(
+            f"{name}: поддерживаются схемы http, https, socks4 и socks5"
+        )
+    if not hostname or port is None:
+        raise ConfigurationError(f"{name}: укажите адрес и порт прокси")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ConfigurationError(f"{name}: путь, query и fragment не поддерживаются")
+    return raw_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +169,7 @@ class Settings:
         backup_dir = _resolve_path(project_dir, values.get("BACKUP_DIR", "backups"))
         debug_dir = log_dir / "debug"
 
-        proxy = values.get("TELEGRAM_PROXY", "").strip() or None
+        proxy = _parse_proxy_url(values, "TELEGRAM_PROXY")
 
         return cls(
             project_dir=project_dir,
@@ -306,6 +330,31 @@ class Settings:
                 minimum=30,
             ),
         )
+
+    @property
+    def playwright_proxy(self) -> dict[str, str] | None:
+        """Преобразует общий URL прокси в формат запуска Playwright."""
+        if not self.telegram_proxy:
+            return None
+
+        parsed = urlsplit(self.telegram_proxy)
+        hostname = parsed.hostname or ""
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        options = {
+            "server": f"{parsed.scheme.lower()}://{host}:{parsed.port}",
+        }
+        if parsed.username is not None:
+            options["username"] = unquote(parsed.username)
+        if parsed.password is not None:
+            options["password"] = unquote(parsed.password)
+        return options
+
+    def playwright_launch_options(self, *, headless: bool) -> dict[str, object]:
+        options: dict[str, object] = {"headless": headless}
+        proxy = self.playwright_proxy
+        if proxy:
+            options["proxy"] = proxy
+        return options
 
     def ensure_directories(self) -> None:
         if os.name == "posix":

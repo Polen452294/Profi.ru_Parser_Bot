@@ -66,7 +66,9 @@ class ProfiClient:
 
     def start(self) -> "ProfiClient":
         self.close()
-        self.browser = self.playwright.chromium.launch(headless=self.settings.headless)
+        self.browser = self.playwright.chromium.launch(
+            **self.settings.playwright_launch_options(headless=self.settings.headless)
+        )
 
         context_options: dict[str, object] = {
             "viewport": {"width": 1440, "height": 900},
@@ -84,9 +86,10 @@ class ProfiClient:
             self._tracing_active = True
         self.page = self.context.new_page()
         logger.info(
-            "Браузер запущен. headless=%s, сессия=%s",
+            "Браузер запущен. headless=%s, сессия=%s, прокси=%s",
             self.settings.headless,
             self.settings.auth_state_path.exists(),
+            "включён" if self.settings.playwright_proxy else "выключен",
         )
         return self
 
