@@ -41,7 +41,7 @@ async def _telegram_api_connection_error(settings: Settings) -> str | None:
     from aiogram import Bot
     from aiogram.client.session.aiohttp import AiohttpSession
 
-    session = AiohttpSession(proxy=settings.telegram_proxy, timeout=10)
+    session = AiohttpSession(proxy=settings.telegram_proxy, timeout=30)
     bot = Bot(token=settings.bot_token, session=session)
     try:
         await bot.get_me()
@@ -49,7 +49,9 @@ async def _telegram_api_connection_error(settings: Settings) -> str | None:
     except Exception as exc:
         return (
             "Telegram API недоступен через TELEGRAM_PROXY: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {exc}. "
+            "Проверьте, что в TELEGRAM_PROXY указан правильный протокол "
+            "порта (socks5:// или http://) и что прокси разрешает api.telegram.org"
         )
     finally:
         await bot.session.close()

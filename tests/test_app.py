@@ -2,11 +2,13 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import (
     _proxy_connection_error,
+    _telegram_api_connection_error,
     build_parser,
     command_filter,
     command_parser,
@@ -16,6 +18,36 @@ from config import Settings
 
 
 class AppTests(unittest.TestCase):
+    def test_telegram_proxy_check_allows_slow_connection(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "BOT_TOKEN": "123:abc",
+                "TELEGRAM_PROXY": "socks5://127.0.0.1:20808",
+            },
+        )
+        session = MagicMock()
+        session.close = AsyncMock()
+        bot = MagicMock()
+        bot.get_me = AsyncMock(return_value=MagicMock())
+        bot.session = session
+
+        with (
+            patch(
+                "aiogram.client.session.aiohttp.AiohttpSession",
+                return_value=session,
+            ) as session_class,
+            patch("aiogram.Bot", return_value=bot),
+        ):
+            error = asyncio.run(_telegram_api_connection_error(settings))
+
+        self.assertIsNone(error)
+        session_class.assert_called_once_with(
+            proxy="socks5://127.0.0.1:20808",
+            timeout=30,
+        )
+        session.close.assert_awaited_once()
+
     def test_unavailable_proxy_is_reported_before_start(self):
         settings = Settings.load(
             env_file=None,
