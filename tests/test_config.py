@@ -64,6 +64,33 @@ class SettingsTests(unittest.TestCase):
             },
         )
 
+    def test_profi_proxy_can_use_direct_connection(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
+                "PROFI_PROXY": "direct",
+            },
+        )
+
+        self.assertEqual(settings.telegram_proxy, "socks5://127.0.0.1:10808")
+        self.assertIsNone(settings.profi_proxy)
+        self.assertIsNone(settings.playwright_proxy)
+
+    def test_profi_proxy_can_override_telegram_proxy(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
+                "PROFI_PROXY": "http://proxy.local:3128",
+            },
+        )
+
+        self.assertEqual(
+            settings.playwright_proxy,
+            {"server": "http://proxy.local:3128"},
+        )
+
     def test_invalid_proxy_is_rejected_early(self):
         invalid_values = (
             "127.0.0.1:10808",

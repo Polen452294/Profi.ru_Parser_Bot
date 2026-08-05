@@ -141,6 +141,7 @@ class Settings:
     bot_token: str
     admin_chat_id: int | None
     telegram_proxy: str | None
+    profi_proxy: str | None
     bot_poll_sec: int
     restart_delay_sec: int
     max_restarts: int
@@ -170,6 +171,13 @@ class Settings:
         debug_dir = log_dir / "debug"
 
         proxy = _parse_proxy_url(values, "TELEGRAM_PROXY")
+        raw_profi_proxy = values.get("PROFI_PROXY", "").strip()
+        if raw_profi_proxy.lower() == "direct":
+            profi_proxy = None
+        elif raw_profi_proxy:
+            profi_proxy = _parse_proxy_url(values, "PROFI_PROXY")
+        else:
+            profi_proxy = proxy
 
         return cls(
             project_dir=project_dir,
@@ -292,6 +300,7 @@ class Settings:
             bot_token=values.get("BOT_TOKEN", "").strip(),
             admin_chat_id=_parse_optional_int(values, "ADMIN_CHAT_ID"),
             telegram_proxy=proxy,
+            profi_proxy=profi_proxy,
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),
             max_restarts=_parse_int(values, "MAX_RESTARTS", 50, minimum=1),
@@ -333,11 +342,11 @@ class Settings:
 
     @property
     def playwright_proxy(self) -> dict[str, str] | None:
-        """Преобразует общий URL прокси в формат запуска Playwright."""
-        if not self.telegram_proxy:
+        """Преобразует URL прокси Profi.ru в формат запуска Playwright."""
+        if not self.profi_proxy:
             return None
 
-        parsed = urlsplit(self.telegram_proxy)
+        parsed = urlsplit(self.profi_proxy)
         hostname = parsed.hostname or ""
         host = f"[{hostname}]" if ":" in hostname else hostname
         options = {

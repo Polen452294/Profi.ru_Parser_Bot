@@ -130,9 +130,14 @@ def run_doctor(settings: Settings) -> int:
                 _print_check("ОШИБКА", proxy_error)
                 errors += 1
             else:
+                browser_route = (
+                    "Chromium/Profi.ru напрямую"
+                    if settings.profi_proxy is None
+                    else "Chromium/Profi.ru через прокси"
+                )
                 _print_check(
                     "OK",
-                    "Общий прокси доступен для Telegram и Chromium/Profi.ru",
+                    f"Прокси Telegram доступен; {browser_route}",
                 )
 
     if settings.auth_state_path.exists():

@@ -97,6 +97,10 @@ Chromium и браузер восстановления сессии. Адрес
 `TELEGRAM_PROXY=` пустым. Никому не передавайте `.env`: в нём находится
 секретный токен Telegram-бота.
 
+Если через прокси Telegram работает, но форма входа Profi.ru зависает на
+индикаторе загрузки, добавьте `PROFI_PROXY=direct`: бот продолжит работать
+через `TELEGRAM_PROXY`, а Chromium будет подключаться к Profi.ru напрямую.
+
 `bash check.sh` проверяет, что указанный адрес и порт прокси действительно
 доступны, и останавливает запуск с понятной ошибкой при отказе соединения.
 
@@ -200,9 +204,15 @@ bash service.sh start    # запуск
 | `/resume` | продолжить после CAPTCHA или блокировки |
 | `/help` | показать справку |
 
-Если Profi.ru изменит форму входа, скриншот сохраняется в
-`logs/debug/session_recovery_failed.png`. Поле SMS-кода можно настроить через
-`PROFI_OTP_SELECTOR` без изменения Python-кода.
+Если Profi.ru изменит форму входа или форма зависнет, бот отправит
+диагностический скриншот в Telegram. PNG, HTML страницы и точный этап ошибки
+сохраняются в `logs/debug/session_recovery_failed.*`. Поле SMS-кода можно
+настроить через `PROFI_OTP_SELECTOR` без изменения Python-кода.
+
+`TELEGRAM_PROXY` по умолчанию применяется и к Chromium. Если Telegram должен
+работать через прокси, а форма входа Profi.ru через него зависает, добавьте
+`PROFI_PROXY=direct`. Для отдельного прокси Chromium укажите в `PROFI_PROXY`
+полный адрес вида `socks5://127.0.0.1:10808`.
 
 ## CAPTCHA, безопасная пауза и heartbeat
 
@@ -307,6 +317,7 @@ backups/
 | `ADMIN_CHAT_ID` | пусто | ID разрешённого чата; пусто — открытый режим |
 | `PROFI_LOGIN` | — | телефон или логин Profi.ru |
 | `TELEGRAM_PROXY` | пусто | общий HTTP/SOCKS-прокси для Telegram и Chromium/Profi.ru |
+| `PROFI_PROXY` | значение `TELEGRAM_PROXY` | отдельный прокси Chromium; `direct` — подключаться к Profi.ru напрямую |
 | `PROFI_PAGE_URL` | `https://profi.ru/backoffice/` | страница заказов |
 | `HEADLESS` | `true` | запускать основной Chromium без окна |
 | `POLL_BASE_SEC` | `90` | минимальная пауза между проверками |

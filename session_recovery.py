@@ -22,7 +22,9 @@ SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
 
 
 class SessionRecoveryError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, screenshot_path: Path | None = None):
+        super().__init__(message)
+        self.screenshot_path = screenshot_path
 
 
 def normalize_sms_code(value: str) -> str | None:
@@ -30,18 +32,81 @@ def normalize_sms_code(value: str) -> str | None:
     return code if SMS_CODE_PATTERN.fullmatch(code) else None
 
 
-def _save_recovery_debug(page, settings: Settings) -> Path:
+def _save_recovery_debug(
+    page,
+    settings: Settings,
+    *,
+    phase: str,
+    error: Exception,
+    failed_requests: list[str],
+) -> Path:
     settings.debug_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = settings.debug_dir / "session_recovery_failed.png"
+    html_path = settings.debug_dir / "session_recovery_failed.html"
+    details_path = settings.debug_dir / "session_recovery_failed.txt"
+    for path in (screenshot_path, html_path, details_path):
+        with suppress(OSError):
+            path.unlink()
     with suppress(Exception):
         page.screenshot(path=str(screenshot_path), full_page=True)
+        screenshot_path.chmod(0o600)
+    with suppress(Exception):
+        html_path.write_text(page.content(), encoding="utf-8")
+        html_path.chmod(0o600)
+    with suppress(Exception):
+        current_url = page.url
+        title = page.title()
+        details_path.write_text(
+            f"Этап: {phase}\n"
+            f"Ошибка: {type(error).__name__}: {error}\n"
+            f"URL: {current_url}\n"
+            f"Заголовок: {title}\n"
+            "Неудачные сетевые запросы:\n"
+            + ("\n".join(failed_requests[-30:]) or "нет данных")
+            + "\n",
+            encoding="utf-8",
+        )
+        details_path.chmod(0o600)
     return screenshot_path
 
 
-def _fill_sms_code(page, selector: str, code: str) -> None:
-    inputs = page.locator(selector)
-    count = inputs.count()
-    visible_inputs = [inputs.nth(index) for index in range(count) if inputs.nth(index).is_visible()]
+def _visible_sms_inputs(root, selector: str) -> list:
+    inputs = root.locator(selector)
+    return [
+        inputs.nth(index)
+        for index in range(inputs.count())
+        if inputs.nth(index).is_visible()
+    ]
+
+
+def _find_sms_code_root(page, selector: str):
+    roots = [page]
+    roots.extend(
+        frame
+        for frame in getattr(page, "frames", [])
+        if frame is not getattr(page, "main_frame", None)
+    )
+    for root in roots:
+        try:
+            if _visible_sms_inputs(root, selector):
+                return root
+        except PlaywrightError:
+            continue
+    return None
+
+
+def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        root = _find_sms_code_root(page, selector)
+        if root is not None:
+            return root
+        time.sleep(0.25)
+    return None
+
+
+def _fill_sms_code(root, selector: str, code: str) -> None:
+    visible_inputs = _visible_sms_inputs(root, selector)
 
     if not visible_inputs:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
@@ -86,6 +151,19 @@ def recreate_profi_session(
         )
         context = browser.new_context(viewport={"width": 1440, "height": 900})
         page = context.new_page()
+        phase = "открытие страницы входа"
+        failed_requests: list[str] = []
+
+        def record_failed_request(request) -> None:
+            if len(failed_requests) >= 100:
+                return
+            safe_url = request.url.split("?", 1)[0]
+            failed_requests.append(
+                f"{request.method} {safe_url}: {request.failure or 'неизвестная ошибка'}"
+            )
+
+        with suppress(Exception):
+            page.on("requestfailed", record_failed_request)
 
         try:
             page.goto(
@@ -94,11 +172,13 @@ def recreate_profi_session(
                 timeout=settings.page_timeout_ms,
             )
 
+            phase = "поиск формы входа"
             login_input = page.get_by_test_id("auth_login_input")
             login_button = page.get_by_test_id("enter_with_sms_btn")
             if login_input.count() != 1 or login_button.count() != 1:
                 raise SessionRecoveryError("Форма входа Profi.ru изменилась")
 
+            phase = "отправка номера телефона"
             login_input.fill(settings.profi_login)
             login_button.click()
 
@@ -106,6 +186,7 @@ def recreate_profi_session(
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
             on_sms_requested()
 
+            phase = "ожидание SMS-кода из Telegram"
             code = code_provider()
             if code == CANCEL_RECOVERY:
                 raise SessionRecoveryError("Восстановление отменено пользователем")
@@ -113,14 +194,37 @@ def recreate_profi_session(
             if normalized_code is None:
                 raise SessionRecoveryError("Получен некорректный SMS-код")
 
-            page.wait_for_selector(
+            phase = "ожидание поля SMS-кода на Profi.ru"
+            otp_wait_ms = min(settings.page_timeout_ms, 30_000)
+            otp_root = _wait_for_sms_code_root(
+                page,
                 settings.profi_otp_selector,
-                state="visible",
-                timeout=settings.page_timeout_ms,
+                otp_wait_ms,
             )
+            if otp_root is None:
+                # Иногда оболочка страницы загружается, а форма авторизации остаётся
+                # на бесконечном индикаторе. Обновляем уже созданную попытку входа,
+                # не нажимая кнопку запроса SMS повторно.
+                phase = "повторная загрузка зависшей формы SMS-кода"
+                page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=settings.page_timeout_ms,
+                )
+                otp_root = _wait_for_sms_code_root(
+                    page,
+                    settings.profi_otp_selector,
+                    otp_wait_ms,
+                )
+            if otp_root is None:
+                raise SessionRecoveryError(
+                    "Profi.ru не показал поле SMS-кода даже после обновления формы. "
+                    "Чаще всего это означает, что через прокси не загрузился модуль авторизации."
+                )
 
-            _fill_sms_code(page, settings.profi_otp_selector, normalized_code)
+            phase = "ввод SMS-кода"
+            _fill_sms_code(otp_root, settings.profi_otp_selector, normalized_code)
 
+            phase = "проверка успешного входа"
             try:
                 page.wait_for_selector(
                     settings.card_selector,
@@ -143,11 +247,22 @@ def recreate_profi_session(
             temporary_state.chmod(0o600)
             temporary_state.replace(settings.auth_state_path)
         except Exception as exc:
-            screenshot_path = _save_recovery_debug(page, settings)
+            screenshot_path = _save_recovery_debug(
+                page,
+                settings,
+                phase=phase,
+                error=exc,
+                failed_requests=failed_requests,
+            )
             if isinstance(exc, SessionRecoveryError):
-                raise
+                raise SessionRecoveryError(
+                    f"Этап «{phase}»: {exc}",
+                    screenshot_path=screenshot_path,
+                ) from exc
+            error_text = str(exc).splitlines()[0].strip() or type(exc).__name__
             raise SessionRecoveryError(
-                f"Не удалось обновить сессию Profi.ru. Диагностика: {screenshot_path}"
+                f"Этап «{phase}»: {error_text}",
+                screenshot_path=screenshot_path,
             ) from exc
         finally:
             browser.close()
@@ -273,9 +388,22 @@ class SessionRecoveryManager:
             self.log.info("Сессия Profi.ru успешно обновлена")
         except SessionRecoveryError as exc:
             self.log.error("Не удалось обновить сессию Profi.ru: %s", exc)
+            if exc.screenshot_path is not None and exc.screenshot_path.exists():
+                try:
+                    await self.audience.send_photo(
+                        self.bot,
+                        str(exc.screenshot_path),
+                        "Диагностика неудачного входа в Profi.ru. "
+                        "На изображении видно состояние страницы в момент ошибки.",
+                    )
+                except Exception:
+                    self.log.exception(
+                        "Не удалось отправить диагностический скриншот в Telegram"
+                    )
             await self._send(
                 "❌ Не удалось обновить сессию Profi.ru.\n"
                 f"Причина: {exc}\n\n"
+                "Подробности сохранены в logs/debug/session_recovery_failed.txt и .html. "
                 "Исправьте настройки при необходимости и отправьте /renew для повтора."
             )
         except Exception:

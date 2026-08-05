@@ -167,7 +167,7 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
-        self.assertLess(events.index("code"), events.index(("wait", "otp-selector")))
+        self.assertLess(events.index("code"), events.index(("fill", "8796")))
 
     def test_sms_code_normalization(self):
         self.assertEqual(normalize_sms_code("12 34-56"), "123456")
