@@ -356,6 +356,15 @@ class Settings:
             options["proxy"] = proxy
         return options
 
+    @property
+    def proxy_endpoint(self) -> tuple[str, int] | None:
+        if not self.telegram_proxy:
+            return None
+        parsed = urlsplit(self.telegram_proxy)
+        if parsed.hostname is None or parsed.port is None:
+            return None
+        return parsed.hostname, parsed.port
+
     def ensure_directories(self) -> None:
         if os.name == "posix":
             os.umask(0o077)

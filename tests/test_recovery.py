@@ -1,12 +1,16 @@
 import asyncio
+from pathlib import Path
+import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
     _fill_sms_code,
     normalize_sms_code,
+    recreate_profi_session,
 )
 
 
@@ -64,6 +68,107 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_sms_is_accepted_before_otp_field_becomes_visible(self):
+        events = []
+
+        class Element:
+            def count(self):
+                return 1
+
+            def is_visible(self):
+                return True
+
+            def fill(self, value):
+                events.append(("fill", value))
+
+            def click(self):
+                events.append("login_click")
+
+            def press(self, key):
+                events.append(("press", key))
+
+        class Inputs:
+            def __init__(self):
+                self.element = Element()
+
+            def count(self):
+                return 1
+
+            def nth(self, index):
+                return self.element
+
+        class Page:
+            def goto(self, *args, **kwargs):
+                events.append("goto")
+
+            def get_by_test_id(self, test_id):
+                return Element()
+
+            def wait_for_selector(self, selector, **kwargs):
+                events.append(("wait", selector))
+
+            def locator(self, selector):
+                return Inputs()
+
+        class Context:
+            def new_page(self):
+                return Page()
+
+            def storage_state(self, path):
+                Path(path).write_text("{}", encoding="utf-8")
+
+        class Browser:
+            def new_context(self, **kwargs):
+                return Context()
+
+            def close(self):
+                return None
+
+        class Chromium:
+            def launch(self, **kwargs):
+                return Browser()
+
+        class Playwright:
+            chromium = Chromium()
+
+        class PlaywrightContext:
+            def __enter__(self):
+                return Playwright()
+
+            def __exit__(self, exc_type, exc, traceback):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": str(root / "data"),
+                    "LOG_DIR": str(root / "logs"),
+                    "BACKUP_DIR": str(root / "backups"),
+                    "PROFI_LOGIN": "+79990000000",
+                    "PROFI_OTP_SELECTOR": "otp-selector",
+                    "PROFI_CARD_SELECTOR": "card-selector",
+                },
+            )
+
+            def announce():
+                events.append("announce")
+
+            def provide_code():
+                events.append("code")
+                return "8796"
+
+            with patch(
+                "session_recovery.sync_playwright",
+                return_value=PlaywrightContext(),
+            ):
+                recreate_profi_session(settings, provide_code, announce)
+
+        self.assertLess(events.index("login_click"), events.index("announce"))
+        self.assertLess(events.index("announce"), events.index("code"))
+        self.assertLess(events.index("code"), events.index(("wait", "otp-selector")))
+
     def test_sms_code_normalization(self):
         self.assertEqual(normalize_sms_code("12 34-56"), "123456")
         self.assertIsNone(normalize_sms_code("12ab"))
@@ -109,6 +214,36 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(accepted)
             self.assertTrue(manager.awaiting_code)
             self.assertIn("4 до 8 цифр", message)
+
+        asyncio.run(scenario())
+
+    def test_code_is_accepted_during_early_recovery_stage(self):
+        async def scenario():
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "BOT_TOKEN": "123:abc",
+                    "ADMIN_CHAT_ID": "42",
+                    "PROFI_LOGIN": "+79990000000",
+                },
+            )
+            bot = FakeBot()
+            manager = SessionRecoveryManager(settings, bot, FakeLog())
+            manager._task = asyncio.create_task(asyncio.sleep(10))
+            try:
+                accepted, message = await manager.submit_code("8796")
+
+                self.assertTrue(accepted)
+                self.assertFalse(manager.awaiting_code)
+                self.assertIn("Код получен", message)
+                await manager._announce_sms_request()
+                self.assertFalse(manager.awaiting_code)
+                self.assertEqual(bot.messages, [])
+                self.assertEqual(manager._code_queue.get_nowait(), "8796")
+            finally:
+                manager._task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await manager._task
 
         asyncio.run(scenario())
 

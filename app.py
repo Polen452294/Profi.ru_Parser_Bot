@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from pathlib import Path
 import shutil
+import socket
 import sys
 
 from config import ConfigurationError, DEFAULT_ENV_FILE, Settings
@@ -18,6 +19,21 @@ START_COMMAND = "start.bat" if IS_WINDOWS else "bash start.sh"
 
 def _print_check(status: str, message: str) -> None:
     print(f"[{status}] {message}")
+
+
+def _proxy_connection_error(settings: Settings, timeout: float = 3.0) -> str | None:
+    endpoint = settings.proxy_endpoint
+    if endpoint is None:
+        return None
+    host, port = endpoint
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return None
+    except OSError as exc:
+        return (
+            f"Прокси {host}:{port} недоступен: {exc}. "
+            "Запустите прокси-сервис или оставьте TELEGRAM_PROXY пустым"
+        )
 
 
 def run_doctor(settings: Settings) -> int:
@@ -101,10 +117,6 @@ def run_doctor(settings: Settings) -> int:
     if settings.telegram_proxy:
         try:
             __import__("aiohttp_socks")
-            _print_check(
-                "OK",
-                "Общий прокси для Telegram и Chromium/Profi.ru настроен",
-            )
         except ImportError:
             _print_check(
                 "ОШИБКА",
@@ -112,6 +124,16 @@ def run_doctor(settings: Settings) -> int:
                 f"повторите {INSTALL_COMMAND}",
             )
             errors += 1
+        else:
+            proxy_error = _proxy_connection_error(settings)
+            if proxy_error:
+                _print_check("ОШИБКА", proxy_error)
+                errors += 1
+            else:
+                _print_check(
+                    "OK",
+                    "Общий прокси доступен для Telegram и Chromium/Profi.ru",
+                )
 
     if settings.auth_state_path.exists():
         _print_check("OK", "Авторизация Profi.ru сохранена")
@@ -175,6 +197,10 @@ def _runtime_preflight(settings: Settings, *, require_telegram: bool) -> bool:
                 "ОШИБКА: для Telegram-прокси повторно запустите "
                 f"{INSTALL_COMMAND}."
             )
+            return False
+        proxy_error = _proxy_connection_error(settings)
+        if proxy_error:
+            print(f"ОШИБКА: {proxy_error}")
             return False
     return True
 

@@ -5,10 +5,32 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app import build_parser, command_filter, command_parser, command_run
+from app import (
+    _proxy_connection_error,
+    build_parser,
+    command_filter,
+    command_parser,
+    command_run,
+)
+from config import Settings
 
 
 class AppTests(unittest.TestCase):
+    def test_unavailable_proxy_is_reported_before_start(self):
+        settings = Settings.load(
+            env_file=None,
+            values={"TELEGRAM_PROXY": "socks5://127.0.0.1:10808"},
+        )
+
+        with patch(
+            "app.socket.create_connection",
+            side_effect=ConnectionRefusedError(111, "Connection refused"),
+        ):
+            error = _proxy_connection_error(settings)
+
+        self.assertIn("127.0.0.1:10808", error)
+        self.assertIn("TELEGRAM_PROXY", error)
+
     def test_cli_exposes_all_user_commands(self):
         parser = build_parser()
 

@@ -102,11 +102,8 @@ def recreate_profi_session(
             login_input.fill(settings.profi_login)
             login_button.click()
 
-            page.wait_for_selector(
-                settings.profi_otp_selector,
-                state="visible",
-                timeout=settings.page_timeout_ms,
-            )
+            # SMS часто приходит раньше, чем поле кода становится видимым.
+            # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
             on_sms_requested()
 
             code = code_provider()
@@ -115,6 +112,12 @@ def recreate_profi_session(
             normalized_code = normalize_sms_code(code)
             if normalized_code is None:
                 raise SessionRecoveryError("Получен некорректный SMS-код")
+
+            page.wait_for_selector(
+                settings.profi_otp_selector,
+                state="visible",
+                timeout=settings.page_timeout_ms,
+            )
 
             _fill_sms_code(page, settings.profi_otp_selector, normalized_code)
 
@@ -218,9 +221,12 @@ class SessionRecoveryManager:
             return True
 
     async def _announce_sms_request(self) -> None:
+        if not self._code_queue.empty():
+            return
         self.awaiting_code = True
         await self._send(
-            "📲 Profi.ru отправил SMS-код. Отправьте боту только цифры кода "
+            "📲 Запрос SMS отправлен в Profi.ru. Как только код придёт, "
+            "отправьте боту только его цифры "
             f"в течение {self.settings.sms_code_timeout_sec // 60} мин.\n\n"
             "Для отмены используйте /cancel."
         )
@@ -282,7 +288,7 @@ class SessionRecoveryManager:
             self.awaiting_code = False
 
     async def submit_code(self, raw_code: str) -> tuple[bool, str]:
-        if not self.awaiting_code:
+        if not self.in_progress and not self.awaiting_code:
             return False, "Сейчас бот не ожидает SMS-код. Используйте /renew."
 
         code = normalize_sms_code(raw_code)
