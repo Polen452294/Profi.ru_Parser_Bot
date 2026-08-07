@@ -8,9 +8,8 @@ from unittest.mock import patch
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
-    _fill_login_input,
     _fill_sms_code,
-    _login_value_matches,
+    _submit_login_form,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -70,42 +69,29 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_masked_phone_value_is_accepted(self):
-        self.assertTrue(
-            _login_value_matches(
-                "+7 (999) 000-00-00",
-                "+79990000000",
-            )
-        )
+    def test_phone_uses_original_direct_fill_method(self):
+        events = []
 
-    def test_phone_typing_fallback_handles_react_mask(self):
-        class MaskedInput:
-            def __init__(self):
-                self.value = ""
-                self.typed = False
-
+        class LoginInput:
             def fill(self, value):
-                self.value = ""
+                events.append(("fill", value))
 
             def input_value(self):
-                return self.value
-
-            def click(self):
-                return None
-
-            def press(self, key):
-                if key == "Backspace":
-                    self.value = ""
+                raise AssertionError("Старый способ не должен читать значение поля")
 
             def type(self, value, delay=0):
-                self.value = "+7 (999) 000-00-00"
-                self.typed = True
+                raise AssertionError("Старый способ не должен вводить номер посимвольно")
 
-        login_input = MaskedInput()
+        class LoginButton:
+            def click(self):
+                events.append("click")
 
-        _fill_login_input(login_input, "+79990000000")
+        _submit_login_form(
+            (LoginInput(), LoginButton()),
+            "+79990000000",
+        )
 
-        self.assertTrue(login_input.typed)
+        self.assertEqual(events, [("fill", "+79990000000"), "click"])
 
     def test_sms_is_accepted_before_otp_field_becomes_visible(self):
         events = []

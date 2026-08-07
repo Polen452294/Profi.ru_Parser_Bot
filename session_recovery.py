@@ -200,36 +200,11 @@ def _wait_for_login_form(page, timeout_ms: int):
     return None
 
 
-def _login_value_matches(actual: str, expected: str) -> bool:
-    actual = actual.strip()
-    expected = expected.strip()
-    expected_digits = re.sub(r"\D", "", expected)
-    actual_digits = re.sub(r"\D", "", actual)
-    if len(expected_digits) >= 10:
-        return actual_digits[-10:] == expected_digits[-10:]
-    return actual.casefold() == expected.casefold()
-
-
-def _fill_login_input(login_input, login: str) -> None:
-    """Заполняет обычное или маскированное поле телефона и проверяет результат."""
-    login_input.fill(login)
-    if _login_value_matches(login_input.input_value(), login):
-        return
-
-    # React-маски иногда игнорируют fill(), но принимают обычный пользовательский ввод.
-    login_input.click()
-    login_input.press("ControlOrMeta+A")
-    login_input.press("Backspace")
-    login_input.type(login, delay=50)
-    if not _login_value_matches(login_input.input_value(), login):
-        raise SessionRecoveryError(
-            "Поле телефона найдено, но Profi.ru не принял введённый номер"
-        )
-
-
 def _submit_login_form(login_form, login: str) -> None:
     login_input, login_button = login_form
-    _fill_login_input(login_input, login)
+    # Возвращён проверенный способ из версий до 83f8e3b: Playwright сам
+    # устанавливает значение поля и отправляет события input/change.
+    login_input.fill(login)
     login_button.click()
 
 
