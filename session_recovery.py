@@ -20,6 +20,12 @@ from config import Settings
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
+SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
+    r"войти\s+по\s+сим[\s‑–—-]*пушу\s+или\s+(?:смс|sms)",
+    re.IGNORECASE,
+)
+SMS_LOGIN_BUTTON_STABLE_POLLS = 3
+LOGIN_BUTTON_RENDER_DELAY_SEC = 2.0
 PHONE_INPUT_SELECTOR = (
     'input[type="tel"], '
     'input[autocomplete="tel"], '
@@ -110,49 +116,86 @@ def _first_visible(locator):
     return None
 
 
-def _visible_login_form(page):
-    """Ищет поле телефона и точную SMS-кнопку только на основной странице."""
+def _visible_phone_input(page):
+    """Ищет только поле телефона на основной странице Profi.ru."""
     try:
         login_input = _first_visible(page.get_by_test_id("auth_login_input"))
         if login_input is None:
             login_input = _first_visible(page.locator(PHONE_INPUT_SELECTOR))
-        login_button = _visible_sms_login_button(page)
-        if login_input is not None and login_button is not None:
-            return login_input, login_button
+        return login_input
     except (AttributeError, PlaywrightError):
         return None
-    return None
+
+
+def _button_text(control) -> str:
+    try:
+        return " ".join(control.inner_text().split())
+    except (AttributeError, PlaywrightError):
+        return ""
 
 
 def _visible_sms_login_button(page):
-    """Ищет только точный data-testid на основной странице Profi.ru."""
+    """Возвращает data-testid только после превращения в нужную SMS-кнопку."""
     try:
         controls = page.locator(SMS_LOGIN_BUTTON_SELECTOR)
         for index in range(controls.count()):
             control = controls.nth(index)
-            if control.is_visible() and control.is_enabled():
+            if (
+                control.is_visible()
+                and control.is_enabled()
+                and SMS_LOGIN_BUTTON_TEXT_PATTERN.search(_button_text(control))
+            ):
                 return control
     except (AttributeError, PlaywrightError):
         return None
     return None
 
 
-def _wait_for_login_form(page, timeout_ms: int):
+def _wait_for_phone_input(page, timeout_ms: int):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
-        login_form = _visible_login_form(page)
-        if login_form is not None:
-            return login_form
+        login_input = _visible_phone_input(page)
+        if login_input is not None:
+            return login_input
         time.sleep(0.25)
     return None
 
 
-def _submit_login_form(login_form, login: str) -> None:
-    login_input, login_button = login_form
+def _fill_login_input(login_input, login: str) -> None:
     # Возвращён проверенный способ из версий до 83f8e3b: Playwright сам
     # устанавливает значение поля и отправляет события input/change.
     login_input.fill(login)
-    login_button.click()
+
+
+def _wait_for_stable_sms_login_button(page, timeout_ms: int):
+    deadline = time.monotonic() + timeout_ms / 1000
+    stable_polls = 0
+    latest = None
+    while time.monotonic() < deadline:
+        control = _visible_sms_login_button(page)
+        if control is None:
+            stable_polls = 0
+            latest = None
+        else:
+            stable_polls += 1
+            latest = control
+            if stable_polls >= SMS_LOGIN_BUTTON_STABLE_POLLS:
+                return latest
+        time.sleep(0.1)
+    return None
+
+
+def _click_verified_sms_login_button(control) -> None:
+    text = _button_text(control)
+    if (
+        not control.is_visible()
+        or not control.is_enabled()
+        or not SMS_LOGIN_BUTTON_TEXT_PATTERN.search(text)
+    ):
+        raise SessionRecoveryError(
+            "Перед кликом кнопка перестала быть входом по сим-пушу или СМС"
+        )
+    control.click()
 
 
 def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
@@ -175,7 +218,7 @@ def _wait_for_sms_code_to_close(page, selector: str, timeout_ms: int) -> bool:
 
 
 def _looks_like_login_page(page) -> bool:
-    if _visible_login_form(page) is not None:
+    if _visible_phone_input(page) is not None:
         return True
     try:
         title = page.title().casefold()
@@ -252,19 +295,35 @@ def recreate_profi_session(
                 timeout=settings.page_timeout_ms,
             )
 
-            phase = "ожидание поля телефона и data-testid=enter_with_sms_btn"
-            login_form = _wait_for_login_form(
+            phase = "ожидание поля телефона"
+            login_input = _wait_for_phone_input(
                 page,
                 min(settings.page_timeout_ms, 30_000),
             )
-            if login_form is None:
+            if login_input is None:
                 raise SessionRecoveryError(
-                    "Не найдены одновременно поле телефона и кнопка "
-                    'data-testid="enter_with_sms_btn"'
+                    "Поле телефона auth_login_input не найдено"
                 )
 
-            phase = 'ввод телефона и нажатие data-testid="enter_with_sms_btn"'
-            _submit_login_form(login_form, settings.profi_login)
+            phase = "ввод телефона"
+            _fill_login_input(login_input, settings.profi_login)
+
+            phase = "пауза после ввода телефона"
+            time.sleep(LOGIN_BUTTON_RENDER_DELAY_SEC)
+
+            phase = "ожидание стабильной кнопки входа по сим-пушу или СМС"
+            login_button = _wait_for_stable_sms_login_button(
+                page,
+                min(settings.page_timeout_ms, 30_000),
+            )
+            if login_button is None:
+                raise SessionRecoveryError(
+                    "После ввода телефона data-testid=enter_with_sms_btn "
+                    "не стал кнопкой «Войти по сим-пушу или СМС»"
+                )
+
+            phase = 'проверка и нажатие data-testid="enter_with_sms_btn"'
+            _click_verified_sms_login_button(login_button)
 
             # SMS часто приходит раньше, чем поле кода становится видимым.
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.

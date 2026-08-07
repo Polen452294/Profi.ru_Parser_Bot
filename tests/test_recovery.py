@@ -8,8 +8,8 @@ from unittest.mock import patch
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
+    _fill_login_input,
     _fill_sms_code,
-    _submit_login_form,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -82,16 +82,9 @@ class RecoveryTests(unittest.TestCase):
             def type(self, value, delay=0):
                 raise AssertionError("Старый способ не должен вводить номер посимвольно")
 
-        class LoginButton:
-            def click(self):
-                events.append("click")
+        _fill_login_input(LoginInput(), "+79990000000")
 
-        _submit_login_form(
-            (LoginInput(), LoginButton()),
-            "+79990000000",
-        )
-
-        self.assertEqual(events, [("fill", "+79990000000"), "click"])
+        self.assertEqual(events, [("fill", "+79990000000")])
 
     def test_sms_is_accepted_before_otp_field_becomes_visible(self):
         events = []
@@ -123,6 +116,11 @@ class RecoveryTests(unittest.TestCase):
 
             def inner_text(self):
                 if self.kind == "sms_method":
+                    if not self.page.phone_filled:
+                        return "Продолжить"
+                    self.page.button_text_reads += 1
+                    if self.page.button_text_reads <= 2:
+                        return "Войти с МТС ID"
                     return "Войти по сим-пушу или СМС"
                 if self.kind == "mts_method":
                     return "Войти с МТС ID"
@@ -133,6 +131,8 @@ class RecoveryTests(unittest.TestCase):
 
             def fill(self, value):
                 events.append(("fill", value))
+                if self.kind == "login_input":
+                    self.page.phone_filled = True
 
             def input_value(self):
                 phone_values = []
@@ -147,6 +147,10 @@ class RecoveryTests(unittest.TestCase):
 
             def click(self):
                 if self.kind == "sms_method":
+                    if not self.page.phone_filled:
+                        raise AssertionError("Номер должен вводиться до клика")
+                    if "сим-пушу" not in self.inner_text():
+                        raise AssertionError("Нельзя нажимать переход в МТС ID")
                     self.page.method_selected = True
                     events.append("sms_method_click")
                 elif self.kind == "mts_method":
@@ -174,6 +178,8 @@ class RecoveryTests(unittest.TestCase):
 
         class Page:
             def __init__(self):
+                self.phone_filled = False
+                self.button_text_reads = 0
                 self.method_selected = False
                 self.otp_closed = False
 
@@ -255,12 +261,17 @@ class RecoveryTests(unittest.TestCase):
             with patch(
                 "session_recovery.sync_playwright",
                 return_value=PlaywrightContext(),
-            ):
+            ), patch(
+                "session_recovery.time.sleep",
+                return_value=None,
+            ) as sleep_mock:
                 recreate_profi_session(
                     settings,
                     provide_code,
                     announce,
                 )
+
+            sleep_mock.assert_any_call(2.0)
 
         self.assertLess(
             events.index(("fill", "+79990000000")),

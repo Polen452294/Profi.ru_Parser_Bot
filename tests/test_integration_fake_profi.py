@@ -27,10 +27,21 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <button id="mts" onclick="location.href='/mts-id-was-clicked'">
                     Войти через МТС ID
                 </button>
-                <button id="sms" data-testid="enter_with_sms_btn" onclick="showOtp()">
-                    Получить код по СМС
+                <button id="sms" data-testid="enter_with_sms_btn"
+                        onclick="location.href='/mts-id-was-clicked'">
+                    Продолжить
                 </button>
                 <script>
+                const loginInput = document.querySelector('[data-testid="auth_login_input"]');
+                const smsButton = document.querySelector('[data-testid="enter_with_sms_btn"]');
+                loginInput.addEventListener('input', () => {
+                    smsButton.textContent = 'Войти с МТС ID';
+                    smsButton.onclick = () => location.href = '/mts-id-was-clicked';
+                    setTimeout(() => {
+                        smsButton.textContent = 'Войти по сим-пушу или СМС';
+                        smsButton.onclick = showOtp;
+                    }, 250);
+                });
                 function showOtp() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
                     document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
