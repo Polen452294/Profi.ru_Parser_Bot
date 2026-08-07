@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from client import ProfiClient
 from config import Settings
+from session_recovery import recreate_profi_session
 
 
 class FakeProfiHandler(BaseHTTPRequestHandler):
@@ -18,6 +19,35 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <html><title>Проверка безопасности</title>
                 <body><div id="captcha-box">Подтвердите, что вы не робот</div></body>
                 </html>
+            """
+        elif self.path.startswith("/recovery"):
+            body = """
+                <html><title>Вход на Профи.ру</title><body>
+                <input data-testid="auth_login_input" placeholder="Логин или телефон">
+                <button data-testid="enter_with_sms_btn" onclick="showMethods()">
+                    Продолжить
+                </button>
+                <script>
+                function showMethods() {
+                    if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
+                    document.body.innerHTML = '<button id="other">Выбрать другой способ</button>';
+                    document.querySelector('#other').onclick = () => {
+                        document.body.innerHTML = '<button id="sms">Войти по сим-пушу или СМС</button>';
+                        document.querySelector('#sms').onclick = showOtp;
+                    };
+                }
+                function showOtp() {
+                    document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
+                    const otp = document.querySelector('[data-testid="auth_sms_code_input"]');
+                    otp.addEventListener('keydown', event => {
+                        if (event.key === 'Enter' && otp.value === '1234') {
+                            document.title = 'Заказы';
+                            document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
+                        }
+                    });
+                }
+                </script>
+                </body></html>
             """
         else:
             body = """
@@ -93,3 +123,30 @@ class FakeProfiIntegrationTests(unittest.TestCase):
                     self.assertTrue(trace.exists())
                 finally:
                     client.close()
+
+    def test_full_sms_recovery_flow_against_local_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": str(root / "data"),
+                    "LOG_DIR": str(root / "logs"),
+                    "BACKUP_DIR": str(root / "backups"),
+                    "PROFI_PAGE_URL": f"{self.base_url}/recovery",
+                    "PROFI_LOGIN": "+79990000000",
+                    "PROFI_CARD_SELECTOR": 'a[data-testid$="_order-snippet"]',
+                    "SESSION_RECOVERY_HEADLESS": "true",
+                    "PAGE_TIMEOUT_SEC": "10",
+                },
+            )
+            announcements = []
+
+            recreate_profi_session(
+                settings,
+                lambda: "1234",
+                lambda: announcements.append("sms_requested"),
+            )
+
+            self.assertEqual(announcements, ["sms_requested"])
+            self.assertTrue(settings.auth_state_path.exists())

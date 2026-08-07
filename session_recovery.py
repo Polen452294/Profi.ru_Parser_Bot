@@ -200,6 +200,39 @@ def _wait_for_login_form(page, timeout_ms: int):
     return None
 
 
+def _login_value_matches(actual: str, expected: str) -> bool:
+    actual = actual.strip()
+    expected = expected.strip()
+    expected_digits = re.sub(r"\D", "", expected)
+    actual_digits = re.sub(r"\D", "", actual)
+    if len(expected_digits) >= 10:
+        return actual_digits[-10:] == expected_digits[-10:]
+    return actual.casefold() == expected.casefold()
+
+
+def _fill_login_input(login_input, login: str) -> None:
+    """Заполняет обычное или маскированное поле телефона и проверяет результат."""
+    login_input.fill(login)
+    if _login_value_matches(login_input.input_value(), login):
+        return
+
+    # React-маски иногда игнорируют fill(), но принимают обычный пользовательский ввод.
+    login_input.click()
+    login_input.press("ControlOrMeta+A")
+    login_input.press("Backspace")
+    login_input.type(login, delay=50)
+    if not _login_value_matches(login_input.input_value(), login):
+        raise SessionRecoveryError(
+            "Поле телефона найдено, но Profi.ru не принял введённый номер"
+        )
+
+
+def _submit_login_form(login_form, login: str) -> None:
+    login_input, login_button = login_form
+    _fill_login_input(login_input, login)
+    login_button.click()
+
+
 def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
@@ -208,6 +241,26 @@ def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
             return root
         time.sleep(0.25)
     return None
+
+
+def _wait_for_sms_code_to_close(page, selector: str, timeout_ms: int) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if _find_sms_code_root(page, selector) is None:
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _looks_like_login_page(page) -> bool:
+    if _visible_login_form(page) is not None:
+        return True
+    try:
+        title = page.title().casefold()
+        url = page.url.casefold()
+    except PlaywrightError:
+        return True
+    return "вход" in title or "login" in title or "/login" in url
 
 
 def _fill_sms_code(root, selector: str, code: str) -> None:
@@ -277,32 +330,35 @@ def recreate_profi_session(
                 timeout=settings.page_timeout_ms,
             )
 
+            phase = "ожидание начальной формы Profi.ru"
+            initial_login_form = _wait_for_login_form(
+                page,
+                min(settings.page_timeout_ms, 30_000),
+            )
+            if initial_login_form is None:
+                raise SessionRecoveryError(
+                    "Начальная форма «Логин или телефон» не появилась"
+                )
+
+            # На фактической странице выбор способа входа появляется только после
+            # нейтральной кнопки «Продолжить». Это не кнопка подтверждения МТС ID.
+            phase = "отправка начальной формы телефона Profi.ru"
+            _submit_login_form(initial_login_form, settings.profi_login)
+
             phase = "выбор входа по сим-пушу или СМС"
             _choose_sms_login_method(
                 page,
                 min(settings.page_timeout_ms, 30_000),
             )
 
-            # До этого места бот намеренно не обращается к полю телефона и кнопке
-            # продолжения: вход через МТС ID не запускается даже как запасной путь.
-            phase = "ожидание формы входа по сим-пушу или СМС"
-            login_form = _wait_for_login_form(
-                page,
-                min(settings.page_timeout_ms, 30_000),
-            )
-            if login_form is None:
-                raise SessionRecoveryError(
-                    "После выбора входа по сим-пушу или СМС форма телефона не появилась"
-                )
-
-            phase = "отправка номера через вход по сим-пушу или СМС"
-            login_input, login_button = login_form
-            login_input.fill(settings.profi_login)
-            if login_input.input_value().strip() != settings.profi_login:
-                raise SessionRecoveryError(
-                    "Поле телефона найдено, но Profi.ru не принял введённый номер"
-                )
-            login_button.click()
+            # В некоторых вариантах интерфейса выбранный способ сразу использует
+            # уже введённый номер, в других показывает форму телефона повторно.
+            time.sleep(0.5)
+            if _find_sms_code_root(page, settings.profi_otp_selector) is None:
+                selected_method_form = _visible_login_form(page)
+                if selected_method_form is not None:
+                    phase = "отправка телефона после выбора SMS-способа"
+                    _submit_login_form(selected_method_form, settings.profi_login)
 
             # SMS часто приходит раньше, чем поле кода становится видимым.
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
@@ -346,23 +402,39 @@ def recreate_profi_session(
             phase = "ввод SMS-кода"
             _fill_sms_code(otp_root, settings.profi_otp_selector, normalized_code)
 
+            phase = "проверка принятия SMS-кода"
+            if not _wait_for_sms_code_to_close(
+                page,
+                settings.profi_otp_selector,
+                min(settings.page_timeout_ms, 20_000),
+            ):
+                raise SessionRecoveryError(
+                    "После ввода кода поле SMS осталось открытым. "
+                    "Код мог быть неверным или просроченным."
+                )
+
             phase = "проверка успешного входа"
+            cards_found = False
             try:
                 page.wait_for_selector(
                     settings.card_selector,
                     state="attached",
-                    timeout=min(settings.page_timeout_ms, 20_000),
+                    timeout=min(settings.page_timeout_ms, 5_000),
                 )
+                cards_found = True
             except PlaywrightTimeoutError:
                 page.goto(
                     settings.page_url,
                     wait_until="domcontentloaded",
                     timeout=settings.page_timeout_ms,
                 )
-                page.wait_for_selector(
-                    settings.card_selector,
-                    state="attached",
-                    timeout=settings.page_timeout_ms,
+                time.sleep(1)
+
+            # Отсутствие карточек может означать, что сейчас просто нет заказов.
+            # Ошибкой считаем возврат формы входа, а не пустую доску заказов.
+            if not cards_found and _looks_like_login_page(page):
+                raise SessionRecoveryError(
+                    "После SMS-кода Profi.ru снова показал страницу входа"
                 )
 
             context.storage_state(path=str(temporary_state))

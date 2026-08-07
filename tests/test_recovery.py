@@ -8,7 +8,9 @@ from unittest.mock import patch
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
+    _fill_login_input,
     _fill_sms_code,
+    _login_value_matches,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -68,6 +70,43 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_masked_phone_value_is_accepted(self):
+        self.assertTrue(
+            _login_value_matches(
+                "+7 (999) 000-00-00",
+                "+79990000000",
+            )
+        )
+
+    def test_phone_typing_fallback_handles_react_mask(self):
+        class MaskedInput:
+            def __init__(self):
+                self.value = ""
+                self.typed = False
+
+            def fill(self, value):
+                self.value = ""
+
+            def input_value(self):
+                return self.value
+
+            def click(self):
+                return None
+
+            def press(self, key):
+                if key == "Backspace":
+                    self.value = ""
+
+            def type(self, value, delay=0):
+                self.value = "+7 (999) 000-00-00"
+                self.typed = True
+
+        login_input = MaskedInput()
+
+        _fill_login_input(login_input, "+79990000000")
+
+        self.assertTrue(login_input.typed)
+
     def test_sms_is_accepted_before_otp_field_becomes_visible(self):
         events = []
 
@@ -85,6 +124,10 @@ class RecoveryTests(unittest.TestCase):
                 return self
 
             def is_visible(self):
+                if self.kind == "login" and self.page.method_selected:
+                    return False
+                if self.kind == "otp" and self.page.otp_closed:
+                    return False
                 return True
 
             def fill(self, value):
@@ -113,6 +156,11 @@ class RecoveryTests(unittest.TestCase):
 
             def press(self, key):
                 events.append(("press", key))
+                if self.kind == "otp" and key == "Enter":
+                    self.page.otp_closed = True
+
+            def type(self, value, delay=0):
+                events.append(("type", value, delay))
 
         class Inputs:
             def __init__(self, element=None):
@@ -128,6 +176,7 @@ class RecoveryTests(unittest.TestCase):
             def __init__(self):
                 self.method_selected = False
                 self.other_method_opened = False
+                self.otp_closed = False
 
             def goto(self, *args, **kwargs):
                 events.append("goto")
@@ -150,7 +199,7 @@ class RecoveryTests(unittest.TestCase):
                 events.append(("wait", selector))
 
             def locator(self, selector):
-                return Inputs()
+                return Inputs(Element(self, "otp"))
 
         class EmptyInputs:
             def count(self):
@@ -214,9 +263,9 @@ class RecoveryTests(unittest.TestCase):
             ):
                 recreate_profi_session(settings, provide_code, announce)
 
-        self.assertLess(events.index("other_method_click"), events.index("sms_method_click"))
-        self.assertLess(events.index("sms_method_click"), events.index(("fill", "+79990000000")))
         self.assertLess(events.index(("fill", "+79990000000")), events.index("login_click"))
+        self.assertLess(events.index("login_click"), events.index("other_method_click"))
+        self.assertLess(events.index("other_method_click"), events.index("sms_method_click"))
         self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
         self.assertLess(events.index("code"), events.index(("fill", "8796")))
