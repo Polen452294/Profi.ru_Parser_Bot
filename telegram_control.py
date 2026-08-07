@@ -69,8 +69,8 @@ def build_dispatcher(
             "/renew — перевыпустить cookies через SMS\n"
             "/resume — продолжить после CAPTCHA/блокировки\n"
             "/cancel — отменить восстановление сессии\n\n"
-            "После ввода телефона бот пришлёт список кнопок: отправьте номер "
-            "нужной. Когда бот запросит код, отправьте сообщением только его цифры."
+            "Бот нажимает только вход по сим-пушу или СМС по точному атрибуту сайта. "
+            "Когда бот запросит код, отправьте сообщением только его цифры."
         )
 
     @router.message(Command("status"))
@@ -78,9 +78,7 @@ def build_dispatcher(
         if not _accept_message(message, audience):
             return
 
-        if recovery.awaiting_login_choice:
-            recovery_status = "ожидается выбор кнопки входа"
-        elif recovery.awaiting_code:
+        if recovery.awaiting_code:
             recovery_status = "ожидается SMS-код"
         elif recovery.in_progress:
             recovery_status = "обновление выполняется"
@@ -148,10 +146,7 @@ def build_dispatcher(
         if not _accept_message(message, audience):
             return
         text = (message.text or "").strip()
-        if recovery.awaiting_login_choice:
-            _, response = await recovery.submit_login_choice(text)
-            await message.answer(response)
-        elif recovery.awaiting_code or (
+        if recovery.awaiting_code or (
             recovery.in_progress and normalize_sms_code(text) is not None
         ):
             _, response = await recovery.submit_code(text)

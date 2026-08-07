@@ -24,21 +24,15 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
             body = """
                 <html><title>Вход на Профи.ру</title><body>
                 <input data-testid="auth_login_input" placeholder="Логин или телефон">
-                <button data-testid="enter_with_sms_btn" onclick="showMethods()">
-                    Продолжить
+                <button id="mts" onclick="location.href='/mts-id-was-clicked'">
+                    Войти через МТС ID
+                </button>
+                <button id="sms" data-testid="enter_with_sms_btn" onclick="showOtp()">
+                    Получить код по СМС
                 </button>
                 <script>
-                function showMethods() {
-                    if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
-                    document.body.innerHTML = `
-                        <button id="mts" onclick="location.href='/mts-id-was-clicked'">
-                            Войти через МТС ID
-                        </button>
-                        <button id="sms">Получить код по СМС</button>
-                    `;
-                    document.querySelector('#sms').onclick = showOtp;
-                }
                 function showOtp() {
+                    if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
                     document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
                     const otp = document.querySelector('[data-testid="auth_sms_code_input"]');
                     otp.addEventListener('keydown', event => {
@@ -148,7 +142,6 @@ class FakeProfiIntegrationTests(unittest.TestCase):
                 settings,
                 lambda: "1234",
                 lambda: announcements.append("sms_requested"),
-                lambda choices: choices.index("Получить код по СМС"),
             )
 
             self.assertEqual(announcements, ["sms_requested"])
