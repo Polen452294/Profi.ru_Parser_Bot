@@ -8,8 +8,8 @@ from unittest.mock import patch
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
-    _choose_sms_login_method,
     _fill_sms_code,
+    _open_mts_then_restore,
     _submit_login_form,
     normalize_sms_code,
     recreate_profi_session,
@@ -70,13 +70,14 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_sms_method_is_selected_without_clicking_mts_id(self):
+    def test_mts_popup_is_closed_before_original_page_is_reloaded(self):
         events = []
 
-        class Control:
-            def __init__(self, name):
-                self.name = name
+        class Popup:
+            def close(self):
+                events.append("popup_close")
 
+        class Control:
             def is_visible(self):
                 return True
 
@@ -84,9 +85,8 @@ class RecoveryTests(unittest.TestCase):
                 return True
 
             def click(self):
-                if self.name == "Войти через МТС ID":
-                    raise AssertionError("Кнопка МТС ID не должна нажиматься")
-                events.append("sms")
+                events.append("mts_click")
+                page.context.pages.append(Popup())
 
         class Controls:
             def __init__(self, items):
@@ -99,25 +99,94 @@ class RecoveryTests(unittest.TestCase):
                 return self.items[index]
 
         class Page:
+            def __init__(self):
+                self.url = "https://profi.ru/backoffice/a.php"
+                self.context = type("Context", (), {"pages": [self]})()
+
             def get_by_role(self, role, name):
-                if role != "button":
-                    return Controls([])
-                names = (
-                    "Войти через МТС ID",
-                    "Войти по сим-пушу или СМС",
-                )
-                return Controls(
-                    [Control(text) for text in names if name.search(text)]
-                )
+                if role == "button" and name.search("Войти с МТС ID"):
+                    return Controls([Control()])
+                return Controls([])
 
             def get_by_text(self, pattern):
                 return Controls([])
 
-        page = Page()
-        with patch("session_recovery.time.sleep", return_value=None):
-            _choose_sms_login_method(page, 1_000)
+            def bring_to_front(self):
+                events.append("bring_to_front")
 
-        self.assertEqual(events, ["sms"])
+            def reload(self, **kwargs):
+                events.append("reload")
+
+        page = Page()
+        _open_mts_then_restore(
+            page,
+            selector_timeout_ms=1_000,
+            navigation_timeout_ms=1_000,
+        )
+
+        self.assertEqual(
+            events,
+            ["mts_click", "popup_close", "bring_to_front", "reload"],
+        )
+
+    def test_same_tab_mts_login_returns_back_before_reload(self):
+        events = []
+
+        class Control:
+            def is_visible(self):
+                return True
+
+            def is_enabled(self):
+                return True
+
+            def click(self):
+                events.append("mts_click")
+                page.url = "https://login.mts.ru/"
+
+        class Controls:
+            def __init__(self, items):
+                self.items = items
+
+            def count(self):
+                return len(self.items)
+
+            def nth(self, index):
+                return self.items[index]
+
+        class Page:
+            def __init__(self):
+                self.url = "https://profi.ru/backoffice/a.php"
+                self.context = type("Context", (), {"pages": [self]})()
+
+            def get_by_role(self, role, name):
+                if role == "button" and name.search("Войти с МТС ID"):
+                    return Controls([Control()])
+                return Controls([])
+
+            def get_by_text(self, pattern):
+                return Controls([])
+
+            def go_back(self, **kwargs):
+                events.append("go_back")
+                self.url = "https://profi.ru/backoffice/a.php"
+
+            def bring_to_front(self):
+                events.append("bring_to_front")
+
+            def reload(self, **kwargs):
+                events.append("reload")
+
+        page = Page()
+        _open_mts_then_restore(
+            page,
+            selector_timeout_ms=1_000,
+            navigation_timeout_ms=1_000,
+        )
+
+        self.assertEqual(
+            events,
+            ["mts_click", "go_back", "bring_to_front", "reload"],
+        )
 
     def test_phone_uses_original_direct_fill_method(self):
         events = []
@@ -160,7 +229,9 @@ class RecoveryTests(unittest.TestCase):
                 return self
 
             def is_visible(self):
-                if self.kind == "login" and self.page.method_selected:
+                if self.kind == "login" and self.page.login_submissions >= 2:
+                    return False
+                if self.kind == "otp" and self.page.login_submissions < 2:
                     return False
                 if self.kind == "otp" and self.page.otp_closed:
                     return False
@@ -181,11 +252,8 @@ class RecoveryTests(unittest.TestCase):
                 return phone_values[-1] if phone_values else ""
 
             def click(self):
-                if self.kind == "method":
-                    self.page.method_selected = True
-                    events.append("sms_method_click")
-                else:
-                    events.append("login_click")
+                self.page.login_submissions += 1
+                events.append(f"login_click_{self.page.login_submissions}")
 
             def press(self, key):
                 events.append(("press", key))
@@ -207,7 +275,7 @@ class RecoveryTests(unittest.TestCase):
 
         class Page:
             def __init__(self):
-                self.method_selected = False
+                self.login_submissions = 0
                 self.otp_closed = False
 
             def goto(self, *args, **kwargs):
@@ -217,11 +285,6 @@ class RecoveryTests(unittest.TestCase):
                 return Element(self, "login")
 
             def get_by_text(self, pattern):
-                if (
-                    "войти" in pattern.pattern
-                    and not self.method_selected
-                ):
-                    return Inputs(Element(self, "method"))
                 return EmptyInputs()
 
             def wait_for_selector(self, selector, **kwargs):
@@ -286,15 +349,32 @@ class RecoveryTests(unittest.TestCase):
                 events.append("code")
                 return "8796"
 
-            with patch(
-                "session_recovery.sync_playwright",
-                return_value=PlaywrightContext(),
+            def open_mts_then_restore(*args, **kwargs):
+                events.append("mts_return_reload")
+
+            with (
+                patch(
+                    "session_recovery.sync_playwright",
+                    return_value=PlaywrightContext(),
+                ),
+                patch(
+                    "session_recovery._open_mts_then_restore",
+                    side_effect=open_mts_then_restore,
+                ),
             ):
                 recreate_profi_session(settings, provide_code, announce)
 
-        self.assertLess(events.index(("fill", "+79990000000")), events.index("login_click"))
-        self.assertLess(events.index("login_click"), events.index("sms_method_click"))
-        self.assertLess(events.index("login_click"), events.index("announce"))
+        phone_fills = [
+            index
+            for index, event in enumerate(events)
+            if event == ("fill", "+79990000000")
+        ]
+        self.assertEqual(len(phone_fills), 2)
+        self.assertLess(phone_fills[0], events.index("login_click_1"))
+        self.assertLess(events.index("login_click_1"), events.index("mts_return_reload"))
+        self.assertLess(events.index("mts_return_reload"), phone_fills[1])
+        self.assertLess(phone_fills[1], events.index("login_click_2"))
+        self.assertLess(events.index("login_click_2"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
         self.assertLess(events.index("code"), events.index(("fill", "8796")))
 

@@ -19,8 +19,8 @@ from config import Settings
 
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
-SMS_LOGIN_METHOD_PATTERN = re.compile(
-    r"^\s*войти\s+по\s+сим[\s\-‐-―]*пушу\s+или\s+смс\s*$",
+MTS_LOGIN_METHOD_PATTERN = re.compile(
+    r"^\s*войти\s+(?:с|через)\s+(?:[мm][тt][сcs]\s*)?id\s*$",
     re.IGNORECASE,
 )
 PHONE_INPUT_SELECTOR = (
@@ -131,8 +131,7 @@ def _page_roots(page) -> list:
 
 def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
     for root in _page_roots(page):
-        # Сначала выбираем только интерактивный элемент с точным доступным
-        # именем. Это не позволяет случайно нажать соседнюю кнопку МТС ID.
+        # Сначала выбираем интерактивный элемент по его доступному имени.
         for role in ("button", "link"):
             try:
                 controls = root.get_by_role(role, name=pattern)
@@ -157,19 +156,96 @@ def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
     return False
 
 
-def _choose_sms_login_method(page, timeout_ms: int) -> None:
-    """Нажимает только «Войти по сим-пушу или СМС», не затрагивая МТС ID."""
-    deadline = time.monotonic() + timeout_ms / 1000
+def _open_mts_then_restore(
+    page,
+    *,
+    selector_timeout_ms: int,
+    navigation_timeout_ms: int,
+) -> None:
+    """Открывает МТС ID один раз и возвращает исходную вкладку Profi.ru."""
+    context = getattr(page, "context", None)
+    known_pages = list(getattr(context, "pages", [])) if context is not None else [page]
+    original_url = str(getattr(page, "url", ""))
 
+    deadline = time.monotonic() + selector_timeout_ms / 1000
+    clicked = False
     while time.monotonic() < deadline:
-        if _click_visible_text(page, SMS_LOGIN_METHOD_PATTERN):
-            return
+        if _click_visible_text(page, MTS_LOGIN_METHOD_PATTERN):
+            clicked = True
+            break
         time.sleep(0.25)
 
-    raise SessionRecoveryError(
-        "Не удалось выбрать «Войти по сим-пушу или СМС». "
-        "Белая кнопка не появилась после нажатия «Продолжить»."
+    if not clicked:
+        raise SessionRecoveryError(
+            "После «Продолжить» не появилась кнопка входа через МТС ID"
+        )
+
+    # Обычно МТС ID открывается в новой вкладке. Даём ей до трёх секунд,
+    # затем закрываем и продолжаем работу в исходной вкладке Profi.ru.
+    popup = None
+    popup_deadline = time.monotonic() + min(3.0, navigation_timeout_ms / 1000)
+    while time.monotonic() < popup_deadline:
+        context_pages = list(getattr(context, "pages", [])) if context is not None else []
+        popup = next(
+            (
+                candidate
+                for candidate in context_pages
+                if not any(candidate is known_page for known_page in known_pages)
+            ),
+            None,
+        )
+        if popup is not None or str(getattr(page, "url", "")) != original_url:
+            break
+        time.sleep(0.1)
+
+    if popup is not None:
+        # Не закрываем вкладку в момент создания: даём МТС ID завершить первую
+        # загрузку и установить состояние, ради которого выполняется этот шаг.
+        popup_url = getattr(popup, "url", None)
+        activation_deadline = time.monotonic() + min(
+            3.0,
+            navigation_timeout_ms / 1000,
+        )
+        while (
+            isinstance(popup_url, str)
+            and popup_url in {"", "about:blank"}
+            and time.monotonic() < activation_deadline
+        ):
+            time.sleep(0.1)
+            popup_url = getattr(popup, "url", None)
+        with suppress(Exception):
+            popup.wait_for_load_state(
+                "domcontentloaded",
+                timeout=min(navigation_timeout_ms, 10_000),
+            )
+        with suppress(Exception):
+            popup.wait_for_timeout(300)
+        with suppress(Exception):
+            popup.close()
+
+    if str(getattr(page, "url", "")) != original_url:
+        page.go_back(
+            wait_until="domcontentloaded",
+            timeout=navigation_timeout_ms,
+        )
+
+    with suppress(Exception):
+        page.bring_to_front()
+    page.reload(
+        wait_until="domcontentloaded",
+        timeout=navigation_timeout_ms,
     )
+
+
+def _wait_for_second_login_form(page, timeout_ms: int):
+    """Ждёт повторную форму телефона после возврата из МТС ID."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        login_form = _visible_login_form(page)
+        if login_form is not None:
+            return login_form
+        time.sleep(0.25)
+    return None
 
 
 def _first_visible(locator):
@@ -329,25 +405,31 @@ def recreate_profi_session(
                     "Начальная форма «Логин или телефон» не появилась"
                 )
 
-            # На фактической странице выбор способа входа появляется только после
-            # нейтральной кнопки «Продолжить». Это не кнопка подтверждения МТС ID.
+            # Первый проход открывает экран выбора способов входа.
             phase = "отправка начальной формы телефона Profi.ru"
             _submit_login_form(initial_login_form, settings.profi_login)
 
-            phase = "выбор входа по сим-пушу или СМС"
-            _choose_sms_login_method(
+            # Проверенный пользователем порядок Profi.ru: один раз открыть МТС ID,
+            # вернуться в исходную вкладку и повторить ввод номера после обновления.
+            phase = "открытие МТС ID и возврат на Profi.ru"
+            _open_mts_then_restore(
+                page,
+                selector_timeout_ms=min(settings.page_timeout_ms, 30_000),
+                navigation_timeout_ms=settings.page_timeout_ms,
+            )
+
+            phase = "ожидание повторной формы телефона Profi.ru"
+            repeated_login_form = _wait_for_second_login_form(
                 page,
                 min(settings.page_timeout_ms, 30_000),
             )
+            if repeated_login_form is None:
+                raise SessionRecoveryError(
+                    "После возврата из МТС ID повторная форма телефона не появилась"
+                )
 
-            # В некоторых вариантах интерфейса выбранный способ сразу использует
-            # уже введённый номер, в других показывает форму телефона повторно.
-            time.sleep(0.5)
-            if _find_sms_code_root(page, settings.profi_otp_selector) is None:
-                selected_method_form = _visible_login_form(page)
-                if selected_method_form is not None:
-                    phase = "отправка телефона после выбора SMS-способа"
-                    _submit_login_form(selected_method_form, settings.profi_login)
+            phase = "повторная отправка телефона для SMS-входа"
+            _submit_login_form(repeated_login_form, settings.profi_login)
 
             # SMS часто приходит раньше, чем поле кода становится видимым.
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.

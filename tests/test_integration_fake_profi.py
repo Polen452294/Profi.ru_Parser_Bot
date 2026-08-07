@@ -20,6 +20,11 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <body><div id="captcha-box">Подтвердите, что вы не робот</div></body>
                 </html>
             """
+        elif self.path.startswith("/mts-id"):
+            body = """
+                <html><title>МТС ID</title>
+                <body><h1>Тестовая вкладка МТС ID</h1></body></html>
+            """
         elif self.path.startswith("/recovery"):
             body = """
                 <html><title>Вход на Профи.ру</title><body>
@@ -30,13 +35,23 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <script>
                 function showMethods() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
+                    if (localStorage.getItem('mtsInitialized') === '1') {
+                        showOtp();
+                        return;
+                    }
                     document.body.innerHTML = `
-                        <button id="mts" onclick="location.href='/mts-id-was-clicked'">
-                            Войти через МТС ID
+                        <button id="mts">
+                            Войти с МТС ID
                         </button>
                         <button id="sms">Войти по сим-пушу или СМС</button>
                     `;
-                    document.querySelector('#sms').onclick = showOtp;
+                    document.querySelector('#mts').onclick = () => {
+                        localStorage.setItem('mtsInitialized', '1');
+                        window.open('/mts-id', '_blank');
+                    };
+                    document.querySelector('#sms').onclick = () => {
+                        location.href = '/sms-button-must-not-be-clicked';
+                    };
                 }
                 function showOtp() {
                     document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
