@@ -80,8 +80,6 @@ class RecoveryTests(unittest.TestCase):
                 return 1
 
             def is_visible(self):
-                if self.kind == "login" and self.page.method_selected:
-                    return False
                 return True
 
             def fill(self, value):
@@ -200,9 +198,10 @@ class RecoveryTests(unittest.TestCase):
             ):
                 recreate_profi_session(settings, provide_code, announce)
 
-        self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("other_method_click"), events.index("sms_method_click"))
-        self.assertLess(events.index("sms_method_click"), events.index("announce"))
+        self.assertLess(events.index("sms_method_click"), events.index(("fill", "+79990000000")))
+        self.assertLess(events.index(("fill", "+79990000000")), events.index("login_click"))
+        self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
         self.assertLess(events.index("code"), events.index(("fill", "8796")))
 

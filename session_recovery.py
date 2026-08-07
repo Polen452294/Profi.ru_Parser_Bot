@@ -128,7 +128,7 @@ def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
 
 
 def _choose_sms_login_method(page, timeout_ms: int) -> None:
-    """Переключает авторизацию с МТС ID на штатный вход Profi.ru по SMS."""
+    """Выбирает штатный вход Profi.ru по SMS до отправки номера телефона."""
     deadline = time.monotonic() + timeout_ms / 1000
     other_method_opened = False
 
@@ -149,18 +149,29 @@ def _choose_sms_login_method(page, timeout_ms: int) -> None:
 
 
 def _visible_login_form(page):
-    try:
-        login_input = page.get_by_test_id("auth_login_input")
-        login_button = page.get_by_test_id("enter_with_sms_btn")
-        if (
-            login_input.count() == 1
-            and login_button.count() == 1
-            and login_input.is_visible()
-            and login_button.is_visible()
-        ):
-            return login_input, login_button
-    except PlaywrightError:
-        pass
+    for root in _page_roots(page):
+        try:
+            login_input = root.get_by_test_id("auth_login_input")
+            login_button = root.get_by_test_id("enter_with_sms_btn")
+            if (
+                login_input.count() == 1
+                and login_button.count() == 1
+                and login_input.is_visible()
+                and login_button.is_visible()
+            ):
+                return login_input, login_button
+        except PlaywrightError:
+            continue
+    return None
+
+
+def _wait_for_login_form(page, timeout_ms: int):
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        login_form = _visible_login_form(page)
+        if login_form is not None:
+            return login_form
+        time.sleep(0.25)
     return None
 
 
@@ -241,32 +252,28 @@ def recreate_profi_session(
                 timeout=settings.page_timeout_ms,
             )
 
-            phase = "поиск формы входа"
-            login_input = page.get_by_test_id("auth_login_input")
-            login_button = page.get_by_test_id("enter_with_sms_btn")
-            if login_input.count() != 1 or login_button.count() != 1:
-                raise SessionRecoveryError("Форма входа Profi.ru изменилась")
-
-            phase = "отправка номера телефона"
-            login_input.fill(settings.profi_login)
-            login_button.click()
-
             phase = "выбор входа по сим-пушу или СМС"
             _choose_sms_login_method(
                 page,
                 min(settings.page_timeout_ms, 30_000),
             )
 
-            # После выхода из МТС ID сайт иногда возвращает штатную форму Profi.ru
-            # и просит подтвердить номер ещё раз. Повторяем ввод только если форма
-            # действительно видима, чтобы не создавать второй SMS-запрос.
-            time.sleep(0.5)
-            repeated_login_form = _visible_login_form(page)
-            if repeated_login_form is not None:
-                phase = "повторная отправка номера после выбора способа входа"
-                repeated_login_input, repeated_login_button = repeated_login_form
-                repeated_login_input.fill(settings.profi_login)
-                repeated_login_button.click()
+            # До этого места бот намеренно не обращается к полю телефона и кнопке
+            # продолжения: вход через МТС ID не запускается даже как запасной путь.
+            phase = "ожидание формы входа по сим-пушу или СМС"
+            login_form = _wait_for_login_form(
+                page,
+                min(settings.page_timeout_ms, 30_000),
+            )
+            if login_form is None:
+                raise SessionRecoveryError(
+                    "После выбора входа по сим-пушу или СМС форма телефона не появилась"
+                )
+
+            phase = "отправка номера через вход по сим-пушу или СМС"
+            login_input, login_button = login_form
+            login_input.fill(settings.profi_login)
+            login_button.click()
 
             # SMS часто приходит раньше, чем поле кода становится видимым.
             # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
