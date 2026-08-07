@@ -57,6 +57,7 @@ class RuntimeTests(unittest.TestCase):
                     "DATA_DIR": str(Path(directory) / "data"),
                     "LOG_DIR": str(Path(directory) / "logs"),
                     "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
+                    "PROFI_PROXY": "socks5://127.0.0.1:10808",
                     "TRACE_ON_FAILURE": "false",
                 },
             )

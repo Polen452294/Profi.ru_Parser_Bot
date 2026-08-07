@@ -178,7 +178,7 @@ class Settings:
         elif raw_profi_proxy:
             profi_proxy = _parse_proxy_url(values, "PROFI_PROXY")
         else:
-            profi_proxy = proxy
+            profi_proxy = None
 
         return cls(
             project_dir=project_dir,
@@ -369,6 +369,10 @@ class Settings:
         proxy = self.playwright_proxy
         if proxy:
             options["proxy"] = proxy
+        else:
+            # Не наследовать прокси рабочего стола или окружения: сайт должен
+            # использовать обычный маршрут Raspberry Pi.
+            options["args"] = ["--no-proxy-server"]
         return options
 
     @property

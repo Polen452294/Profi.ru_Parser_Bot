@@ -42,8 +42,8 @@ bash service.sh start    — запустить
 /health показывает Telegram, Chromium, cookies, heartbeat, последнюю успешную
 проверку Profi.ru, режим общего прокси и свободное место на диске.
 
-Если в .env указан TELEGRAM_PROXY=socks5://127.0.0.1:10808, через него работают
-и Telegram, и Chromium/Profi.ru. На порту 10808 должен быть запущен SOCKS5-прокси.
+Если в .env указан TELEGRAM_PROXY=socks5://127.0.0.1:20808, через него работает
+только Telegram. Укажите PROFI_PROXY=direct: Chromium/Profi.ru пойдёт напрямую.
 
 ВНИМАНИЕ: в открытом режиме все пользователи получают заявки и могут управлять
 восстановлением сессии. Для рабочего аккаунта безопаснее указать ADMIN_CHAT_ID.

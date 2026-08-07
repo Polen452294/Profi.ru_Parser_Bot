@@ -59,11 +59,20 @@ def build_health_report(
     else:
         parser_state = str(heartbeat.get("status") or "нет данных")
 
+    if settings.telegram_proxy and settings.profi_proxy:
+        proxy_state = "Telegram и Profi.ru через прокси"
+    elif settings.telegram_proxy:
+        proxy_state = "Telegram через прокси; Profi.ru напрямую"
+    elif settings.profi_proxy:
+        proxy_state = "Telegram напрямую; Profi.ru через прокси"
+    else:
+        proxy_state = "не используется"
+
     return (
         f"🩺 Состояние сервиса v{APP_VERSION}\n\n"
         f"Telegram: ✅ команда получена\n"
         f"Chromium: {'✅ установлен' if chromium_installed() else '❌ не найден'}\n"
-        f"Прокси: {'✅ Telegram и Profi.ru' if settings.telegram_proxy else 'прямое подключение'}\n"
+        f"Прокси: {proxy_state}\n"
         f"Cookies: {'✅ есть' if settings.auth_state_path.exists() else '⚠️ отсутствуют'}\n"
         f"Парсер: {parser_state}\n"
         f"Heartbeat: {_age_text(alive_at)}\n"

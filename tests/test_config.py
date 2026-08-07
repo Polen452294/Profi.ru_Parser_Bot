@@ -38,10 +38,13 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "POLL_BASE_SEC"):
             Settings.load(env_file=None, values={"POLL_BASE_SEC": "быстро"})
 
-    def test_proxy_is_shared_with_playwright(self):
+    def test_profi_proxy_can_be_explicitly_shared_with_playwright(self):
         settings = Settings.load(
             env_file=None,
-            values={"TELEGRAM_PROXY": "socks5://127.0.0.1:10808"},
+            values={
+                "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
+                "PROFI_PROXY": "socks5://127.0.0.1:10808",
+            },
         )
 
         self.assertEqual(
@@ -49,10 +52,23 @@ class SettingsTests(unittest.TestCase):
             {"server": "socks5://127.0.0.1:10808"},
         )
 
+    def test_telegram_proxy_does_not_affect_playwright_by_default(self):
+        settings = Settings.load(
+            env_file=None,
+            values={"TELEGRAM_PROXY": "socks5://127.0.0.1:20808"},
+        )
+
+        self.assertEqual(settings.telegram_proxy, "socks5://127.0.0.1:20808")
+        self.assertIsNone(settings.playwright_proxy)
+        self.assertEqual(
+            settings.playwright_launch_options(headless=True),
+            {"headless": True, "args": ["--no-proxy-server"]},
+        )
+
     def test_authenticated_proxy_is_converted_for_playwright(self):
         settings = Settings.load(
             env_file=None,
-            values={"TELEGRAM_PROXY": "http://user:p%40ss@proxy.local:3128"},
+            values={"PROFI_PROXY": "http://user:p%40ss@proxy.local:3128"},
         )
 
         self.assertEqual(
@@ -76,6 +92,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.telegram_proxy, "socks5://127.0.0.1:10808")
         self.assertIsNone(settings.profi_proxy)
         self.assertIsNone(settings.playwright_proxy)
+        self.assertEqual(
+            settings.playwright_launch_options(headless=True),
+            {"headless": True, "args": ["--no-proxy-server"]},
+        )
 
     def test_telegram_proxy_can_use_local_dns(self):
         settings = Settings.load(

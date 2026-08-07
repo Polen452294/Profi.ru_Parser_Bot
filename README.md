@@ -85,21 +85,20 @@ SESSION_RECOVERY_ENABLED=true
 SESSION_RECOVERY_HEADLESS=true
 ```
 
-Если сервер должен подключаться к Telegram и Profi.ru через общий прокси:
+Если сервер должен подключаться к Telegram через локальный Naive/SOCKS5:
 
 ```dotenv
-TELEGRAM_PROXY=socks5://127.0.0.1:10808
+TELEGRAM_PROXY=socks5://127.0.0.1:20808
+PROFI_PROXY=direct
 ```
 
-При заполненном `TELEGRAM_PROXY` через него работают Telegram, основной
-Chromium и браузер восстановления сессии. Адрес `127.0.0.1:10808` подходит
-только тогда, когда SOCKS5-сервис запущен на этом же сервере. Иначе оставьте
-`TELEGRAM_PROXY=` пустым. Никому не передавайте `.env`: в нём находится
-секретный токен Telegram-бота.
+`TELEGRAM_PROXY` применяется только к Telegram. Основной Chromium и браузер
+восстановления сессии запускаются с `--no-proxy-server` и используют обычный
+канал Raspberry Pi. Адрес `127.0.0.1:20808` подходит, когда Naive/SOCKS5
+запущен на этом же сервере.
 
-Если через прокси Telegram работает, но форма входа Profi.ru зависает на
-индикаторе загрузки, добавьте `PROFI_PROXY=direct`: бот продолжит работать
-через `TELEGRAM_PROXY`, а Chromium будет подключаться к Profi.ru напрямую.
+Чтобы намеренно направить Chromium через отдельный прокси, укажите его полный
+адрес в `PROFI_PROXY`. Значение `direct` закрепляет обычное подключение.
 Если проверка через `socks5h://` обрывается, а через обычный `socks5://`
 работает, задайте `TELEGRAM_PROXY_RDNS=false` — Telegram останется на SOCKS,
 но DNS-имя будет разрешать Raspberry Pi.
@@ -229,10 +228,9 @@ bash service.sh start    # запуск
 перебор кнопок, ручной список и запасные клики отсутствуют. При несовпадении
 восстановление останавливается с диагностикой.
 
-`TELEGRAM_PROXY` по умолчанию применяется и к Chromium. Если Telegram должен
-работать через прокси, а форма входа Profi.ru через него зависает, добавьте
-`PROFI_PROXY=direct`. Для отдельного прокси Chromium укажите в `PROFI_PROXY`
-полный адрес вида `socks5://127.0.0.1:10808`.
+`TELEGRAM_PROXY` применяется только к Telegram. Chromium по умолчанию работает
+напрямую. Для отдельного прокси Chromium укажите в `PROFI_PROXY` полный адрес
+вида `socks5://127.0.0.1:20808`.
 
 ## CAPTCHA, безопасная пауза и heartbeat
 
@@ -336,9 +334,9 @@ backups/
 | `BOT_TOKEN` | — | токен Telegram-бота |
 | `ADMIN_CHAT_ID` | пусто | ID разрешённого чата; пусто — открытый режим |
 | `PROFI_LOGIN` | — | телефон или логин Profi.ru |
-| `TELEGRAM_PROXY` | пусто | общий HTTP/SOCKS-прокси для Telegram и Chromium/Profi.ru |
+| `TELEGRAM_PROXY` | пусто | HTTP/SOCKS-прокси только для Telegram |
 | `TELEGRAM_PROXY_RDNS` | `true` | где разрешать DNS для SOCKS: на прокси или локально |
-| `PROFI_PROXY` | значение `TELEGRAM_PROXY` | отдельный прокси Chromium; `direct` — подключаться к Profi.ru напрямую |
+| `PROFI_PROXY` | `direct` | отдельный прокси Chromium; `direct` — подключаться к Profi.ru напрямую |
 | `PROFI_PAGE_URL` | `https://profi.ru/backoffice/` | страница заказов |
 | `HEADLESS` | `true` | запускать основной Chromium без окна |
 | `POLL_BASE_SEC` | `90` | минимальная пауза между проверками |
