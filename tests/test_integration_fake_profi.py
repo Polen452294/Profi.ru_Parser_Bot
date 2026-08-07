@@ -34,7 +34,7 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                         <button id="mts" onclick="location.href='/mts-id-was-clicked'">
                             Войти через МТС ID
                         </button>
-                        <button id="sms">Войти по сим-пушу или СМС</button>
+                        <button id="sms">Получить код по СМС</button>
                     `;
                     document.querySelector('#sms').onclick = showOtp;
                 }

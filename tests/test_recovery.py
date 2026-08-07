@@ -104,14 +104,14 @@ class RecoveryTests(unittest.TestCase):
                     return Controls([])
                 names = (
                     "Войти через МТС ID",
-                    "Войти по сим-пушу или СМС",
+                    "Получить код по СМС",
                 )
                 return Controls(
                     [Control(text) for text in names if name.search(text)]
                 )
 
             def get_by_text(self, pattern):
-                return Controls([])
+                raise AssertionError("Обычный текст страницы нельзя нажимать")
 
         page = Page()
         with patch("session_recovery.time.sleep", return_value=None):
@@ -166,6 +166,9 @@ class RecoveryTests(unittest.TestCase):
                     return False
                 return True
 
+            def is_enabled(self):
+                return True
+
             def fill(self, value):
                 events.append(("fill", value))
 
@@ -216,13 +219,17 @@ class RecoveryTests(unittest.TestCase):
             def get_by_test_id(self, test_id):
                 return Element(self, "login")
 
-            def get_by_text(self, pattern):
+            def get_by_role(self, role, name):
                 if (
-                    "войти" in pattern.pattern
+                    role == "button"
+                    and name.search("Войти по сим-пушу или СМС")
                     and not self.method_selected
                 ):
                     return Inputs(Element(self, "method"))
                 return EmptyInputs()
+
+            def get_by_text(self, pattern):
+                raise AssertionError("Обычный текст страницы нельзя нажимать")
 
             def wait_for_selector(self, selector, **kwargs):
                 events.append(("wait", selector))

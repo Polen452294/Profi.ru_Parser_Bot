@@ -20,7 +20,7 @@ from config import Settings
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
 SMS_LOGIN_METHOD_PATTERN = re.compile(
-    r"^\s*войти\s+по\s+сим[\s\-‐-―]*пушу\s+или\s+смс\s*$",
+    r"(?:смс|sms)",
     re.IGNORECASE,
 )
 PHONE_INPUT_SELECTOR = (
@@ -129,10 +129,10 @@ def _page_roots(page) -> list:
     return roots
 
 
-def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
+def _click_visible_control(page, pattern: re.Pattern[str]) -> bool:
     for root in _page_roots(page):
-        # Сначала выбираем только интерактивный элемент с точным доступным
-        # именем. Это не позволяет случайно нажать соседнюю кнопку МТС ID.
+        # Ищем слово только в доступном имени кнопки или ссылки. Обычный текст
+        # страницы намеренно не нажимаем, даже если в нём тоже встречается «СМС».
         for role in ("button", "link"):
             try:
                 controls = root.get_by_role(role, name=pattern)
@@ -143,32 +143,20 @@ def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
                         return True
             except (AttributeError, PlaywrightError):
                 continue
-
-        # Резерв для виджета, где кликабельный текст размечен обычным div.
-        try:
-            matches = root.get_by_text(pattern)
-            for index in range(matches.count()):
-                match = matches.nth(index)
-                if match.is_visible():
-                    match.click()
-                    return True
-        except PlaywrightError:
-            continue
     return False
 
 
 def _choose_sms_login_method(page, timeout_ms: int) -> None:
-    """Нажимает только «Войти по сим-пушу или СМС», не затрагивая МТС ID."""
+    """Нажимает видимую активную кнопку или ссылку со словом «СМС»/«SMS»."""
     deadline = time.monotonic() + timeout_ms / 1000
 
     while time.monotonic() < deadline:
-        if _click_visible_text(page, SMS_LOGIN_METHOD_PATTERN):
+        if _click_visible_control(page, SMS_LOGIN_METHOD_PATTERN):
             return
         time.sleep(0.25)
 
     raise SessionRecoveryError(
-        "Не удалось выбрать «Войти по сим-пушу или СМС». "
-        "Белая кнопка не появилась после нажатия «Продолжить»."
+        "После «Продолжить» не появилась активная кнопка или ссылка со словом «СМС»."
     )
 
 
