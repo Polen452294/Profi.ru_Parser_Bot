@@ -27,6 +27,16 @@ OTHER_LOGIN_METHOD_PATTERN = re.compile(
     r"выбрать\s+другой\s+способ",
     re.IGNORECASE,
 )
+PHONE_INPUT_SELECTOR = (
+    'input[type="tel"], '
+    'input[autocomplete="tel"], '
+    'input[name*="phone" i], '
+    'input[inputmode="tel"]'
+)
+PHONE_SUBMIT_PATTERN = re.compile(
+    r"продолжить|получить\s+код|войти",
+    re.IGNORECASE,
+)
 
 
 class SessionRecoveryError(RuntimeError):
@@ -148,17 +158,32 @@ def _choose_sms_login_method(page, timeout_ms: int) -> None:
     )
 
 
+def _first_visible(locator):
+    for index in range(locator.count()):
+        candidate = locator.nth(index)
+        if candidate.is_visible():
+            return candidate
+    return None
+
+
 def _visible_login_form(page):
     for root in _page_roots(page):
         try:
-            login_input = root.get_by_test_id("auth_login_input")
-            login_button = root.get_by_test_id("enter_with_sms_btn")
-            if (
-                login_input.count() == 1
-                and login_button.count() == 1
-                and login_input.is_visible()
-                and login_button.is_visible()
-            ):
+            login_input = _first_visible(
+                root.get_by_test_id("auth_login_input")
+            )
+            if login_input is None:
+                login_input = _first_visible(root.locator(PHONE_INPUT_SELECTOR))
+
+            login_button = _first_visible(
+                root.get_by_test_id("enter_with_sms_btn")
+            )
+            if login_button is None:
+                login_button = _first_visible(
+                    root.get_by_role("button", name=PHONE_SUBMIT_PATTERN)
+                )
+
+            if login_input is not None and login_button is not None:
                 return login_input, login_button
         except PlaywrightError:
             continue
@@ -273,6 +298,10 @@ def recreate_profi_session(
             phase = "отправка номера через вход по сим-пушу или СМС"
             login_input, login_button = login_form
             login_input.fill(settings.profi_login)
+            if login_input.input_value().strip() != settings.profi_login:
+                raise SessionRecoveryError(
+                    "Поле телефона найдено, но Profi.ru не принял введённый номер"
+                )
             login_button.click()
 
             # SMS часто приходит раньше, чем поле кода становится видимым.

@@ -79,11 +79,27 @@ class RecoveryTests(unittest.TestCase):
             def count(self):
                 return 1
 
+            def nth(self, index):
+                if index != 0:
+                    raise IndexError(index)
+                return self
+
             def is_visible(self):
                 return True
 
             def fill(self, value):
                 events.append(("fill", value))
+
+            def input_value(self):
+                phone_values = []
+                for item in events:
+                    if (
+                        isinstance(item, tuple)
+                        and item[0] == "fill"
+                        and item[1].startswith("+")
+                    ):
+                        phone_values.append(item[1])
+                return phone_values[-1] if phone_values else ""
 
             def click(self):
                 if self.kind == "method":
