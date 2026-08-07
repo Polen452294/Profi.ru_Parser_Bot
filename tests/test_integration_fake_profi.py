@@ -148,6 +148,7 @@ class FakeProfiIntegrationTests(unittest.TestCase):
                 settings,
                 lambda: "1234",
                 lambda: announcements.append("sms_requested"),
+                lambda choices: choices.index("Получить код по СМС"),
             )
 
             self.assertEqual(announcements, ["sms_requested"])

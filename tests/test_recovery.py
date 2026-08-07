@@ -7,12 +7,10 @@ from unittest.mock import patch
 
 from config import Settings
 from session_recovery import (
-    SMS_LOGIN_METHOD_PATTERN,
     SessionRecoveryManager,
-    _choose_sms_login_method,
-    _click_visible_control,
     _fill_sms_code,
     _submit_login_form,
+    _visible_login_button_choices,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -72,7 +70,7 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_sms_method_is_selected_without_clicking_mts_id(self):
+    def test_visible_login_buttons_are_listed_without_clicking_them(self):
         events = []
 
         class Control:
@@ -92,9 +90,7 @@ class RecoveryTests(unittest.TestCase):
                 return None
 
             def click(self):
-                if "MTS" in self.name or "ID" in self.name:
-                    raise AssertionError("Кнопка МТС ID не должна нажиматься")
-                events.append("sms")
+                events.append(self.name)
 
         class Controls:
             def __init__(self, items):
@@ -107,33 +103,38 @@ class RecoveryTests(unittest.TestCase):
                 return self.items[index]
 
         class Page:
-            def get_by_role(self, role, name):
+            def get_by_role(self, role, name=None):
                 if role != "button":
                     return Controls([])
                 names = (
-                    "SMS-вход через MTS ID",
-                    "Получить код по СМС",
+                    "Продолжить",
+                    "Войти с МТС ID",
+                    "Войти по сим-пушу или СМС",
                 )
-                return Controls(
-                    [Control(text) for text in names if name.search(text)]
-                )
+                self.assert_no_name_filter(name)
+                return Controls([Control(text) for text in names])
 
-            def get_by_text(self, pattern):
-                raise AssertionError("Обычный текст страницы нельзя нажимать")
+            @staticmethod
+            def assert_no_name_filter(name):
+                if name is not None:
+                    raise AssertionError("Код не должен угадывать кнопку по тексту")
 
         page = Page()
-        with patch("session_recovery.time.sleep", return_value=None):
-            _choose_sms_login_method(page, 1_000)
+        choices = _visible_login_button_choices(page)
 
-        self.assertEqual(events, ["sms"])
+        self.assertEqual(
+            [choice.label for choice in choices],
+            ["Войти с МТС ID", "Войти по сим-пушу или СМС"],
+        )
+        self.assertEqual(events, [])
 
-    def test_sms_search_does_not_enter_mts_tabs_or_frames(self):
+    def test_button_listing_does_not_enter_other_tabs_or_frames(self):
         class Controls:
             def count(self):
                 return 0
 
         class TrapRoot:
-            def get_by_role(self, role, name):
+            def get_by_role(self, role, name=None):
                 raise AssertionError("Вкладки и iframe МТС нельзя просматривать")
 
         class Page:
@@ -143,12 +144,10 @@ class RecoveryTests(unittest.TestCase):
             def __init__(self):
                 self.context = type("Context", (), {"pages": [self, TrapRoot()]})()
 
-            def get_by_role(self, role, name):
+            def get_by_role(self, role, name=None):
                 return Controls()
 
-        self.assertFalse(
-            _click_visible_control(Page(), SMS_LOGIN_METHOD_PATTERN)
-        )
+        self.assertEqual(_visible_login_button_choices(Page()), [])
 
     def test_phone_uses_original_direct_fill_method(self):
         events = []
@@ -201,8 +200,10 @@ class RecoveryTests(unittest.TestCase):
                 return True
 
             def inner_text(self):
-                if self.kind == "method":
+                if self.kind == "sms_method":
                     return "Войти по сим-пушу или СМС"
+                if self.kind == "mts_method":
+                    return "Войти с МТС ID"
                 return ""
 
             def get_attribute(self, name):
@@ -223,9 +224,11 @@ class RecoveryTests(unittest.TestCase):
                 return phone_values[-1] if phone_values else ""
 
             def click(self):
-                if self.kind == "method":
+                if self.kind == "sms_method":
                     self.page.method_selected = True
                     events.append("sms_method_click")
+                elif self.kind == "mts_method":
+                    raise AssertionError("Кнопка МТС ID не должна нажиматься")
                 else:
                     events.append("login_click")
 
@@ -247,6 +250,16 @@ class RecoveryTests(unittest.TestCase):
             def nth(self, index):
                 return self.element
 
+        class Elements:
+            def __init__(self, elements):
+                self.elements = elements
+
+            def count(self):
+                return len(self.elements)
+
+            def nth(self, index):
+                return self.elements[index]
+
         class Page:
             def __init__(self):
                 self.method_selected = False
@@ -258,17 +271,15 @@ class RecoveryTests(unittest.TestCase):
             def get_by_test_id(self, test_id):
                 return Element(self, "login")
 
-            def get_by_role(self, role, name):
-                if (
-                    role == "button"
-                    and name.search("Войти по сим-пушу или СМС")
-                    and not self.method_selected
-                ):
-                    return Inputs(Element(self, "method"))
+            def get_by_role(self, role, name=None):
+                if role == "button" and name is None and not self.method_selected:
+                    return Elements(
+                        [
+                            Element(self, "mts_method"),
+                            Element(self, "sms_method"),
+                        ]
+                    )
                 return EmptyInputs()
-
-            def get_by_text(self, pattern):
-                raise AssertionError("Обычный текст страницы нельзя нажимать")
 
             def wait_for_selector(self, selector, **kwargs):
                 events.append(("wait", selector))
@@ -332,13 +343,29 @@ class RecoveryTests(unittest.TestCase):
                 events.append("code")
                 return "8796"
 
+            def choose_button(labels):
+                events.append(("choices", tuple(labels)))
+                return labels.index("Войти по сим-пушу или СМС")
+
             with patch(
                 "session_recovery.sync_playwright",
                 return_value=PlaywrightContext(),
             ):
-                recreate_profi_session(settings, provide_code, announce)
+                recreate_profi_session(
+                    settings,
+                    provide_code,
+                    announce,
+                    choose_button,
+                )
 
         self.assertLess(events.index(("fill", "+79990000000")), events.index("login_click"))
+        self.assertIn(
+            (
+                "choices",
+                ("Войти с МТС ID", "Войти по сим-пушу или СМС"),
+            ),
+            events,
+        )
         self.assertLess(events.index("login_click"), events.index("sms_method_click"))
         self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
@@ -368,6 +395,59 @@ class RecoveryTests(unittest.TestCase):
             accepted, message = await manager.submit_code("123 456")
             self.assertTrue(accepted)
             self.assertIn("Код получен", message)
+
+        asyncio.run(scenario())
+
+    def test_manager_accepts_only_a_number_from_login_button_list(self):
+        async def scenario():
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "BOT_TOKEN": "123:abc",
+                    "ADMIN_CHAT_ID": "42",
+                    "PROFI_LOGIN": "+79990000000",
+                },
+            )
+            manager = SessionRecoveryManager(settings, FakeBot(), FakeLog())
+            manager.awaiting_login_choice = True
+            manager.login_button_choices = (
+                "Войти с МТС ID",
+                "Войти по сим-пушу или СМС",
+            )
+
+            accepted, message = await manager.submit_login_choice("3")
+            self.assertFalse(accepted)
+            self.assertTrue(manager.awaiting_login_choice)
+            self.assertIn("от 1 до 2", message)
+
+            accepted, message = await manager.submit_login_choice("2")
+            self.assertTrue(accepted)
+            self.assertFalse(manager.awaiting_login_choice)
+            self.assertIn("Войти по сим-пушу или СМС", message)
+            self.assertEqual(manager._login_choice_queue.get_nowait(), 1)
+
+        asyncio.run(scenario())
+
+    def test_manager_announces_numbered_login_buttons(self):
+        async def scenario():
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "BOT_TOKEN": "123:abc",
+                    "ADMIN_CHAT_ID": "42",
+                    "PROFI_LOGIN": "+79990000000",
+                },
+            )
+            bot = FakeBot()
+            manager = SessionRecoveryManager(settings, bot, FakeLog())
+
+            await manager._announce_login_choices(
+                ["Войти с МТС ID", "Войти по сим-пушу или СМС"]
+            )
+
+            self.assertTrue(manager.awaiting_login_choice)
+            self.assertIn("1. Войти с МТС ID", bot.messages[-1][1])
+            self.assertIn("2. Войти по сим-пушу или СМС", bot.messages[-1][1])
 
         asyncio.run(scenario())
 

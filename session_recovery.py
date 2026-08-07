@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
 import re
@@ -19,14 +20,8 @@ from config import Settings
 
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
-SMS_LOGIN_METHOD_PATTERN = re.compile(
-    r"(?:смс|sms)",
-    re.IGNORECASE,
-)
-FORBIDDEN_SMS_CONTROL_PATTERN = re.compile(
-    r"(?:мтс|mts|(?:^|\s)id(?:\s|$))",
-    re.IGNORECASE,
-)
+CONTINUE_BUTTON_PATTERN = re.compile(r"^\s*продолжить\s*$", re.IGNORECASE)
+MAX_LOGIN_BUTTON_CHOICES = 10
 PHONE_INPUT_SELECTOR = (
     'input[type="tel"], '
     'input[autocomplete="tel"], '
@@ -43,6 +38,12 @@ class SessionRecoveryError(RuntimeError):
     def __init__(self, message: str, *, screenshot_path: Path | None = None):
         super().__init__(message)
         self.screenshot_path = screenshot_path
+
+
+@dataclass(slots=True)
+class LoginButtonChoice:
+    label: str
+    locator: object
 
 
 def normalize_sms_code(value: str) -> str | None:
@@ -133,48 +134,66 @@ def _page_roots(page) -> list:
     return roots
 
 
-def _click_visible_control(page, pattern: re.Pattern[str]) -> bool:
-    # Ищем только на исходной верхней странице Profi.ru. Вкладки и iframe
-    # намеренно не просматриваем: внутри МТС ID тоже может встретиться SMS.
+def _control_label(control) -> str:
+    label = ""
+    with suppress(Exception):
+        label = control.inner_text().strip()
+    if not label:
+        with suppress(Exception):
+            label = (control.get_attribute("aria-label") or "").strip()
+    return " ".join(label.split())
+
+
+def _visible_login_button_choices(page) -> list[LoginButtonChoice]:
+    """Возвращает кнопки и ссылки основной страницы, ничего не нажимая."""
+    choices: list[LoginButtonChoice] = []
     for role in ("button", "link"):
         try:
-            controls = page.get_by_role(role, name=pattern)
+            controls = page.get_by_role(role)
             for index in range(controls.count()):
                 control = controls.nth(index)
                 if not control.is_visible() or not control.is_enabled():
                     continue
 
-                label = ""
-                with suppress(Exception):
-                    label = control.inner_text().strip()
-                if not label:
-                    with suppress(Exception):
-                        label = (control.get_attribute("aria-label") or "").strip()
-
-                if not pattern.search(label):
-                    continue
-                if FORBIDDEN_SMS_CONTROL_PATTERN.search(label):
+                label = _control_label(control)
+                if not label or CONTINUE_BUTTON_PATTERN.fullmatch(label):
                     continue
 
-                control.click()
-                return True
+                choices.append(LoginButtonChoice(label=label, locator=control))
+                if len(choices) >= MAX_LOGIN_BUTTON_CHOICES:
+                    return choices
         except (AttributeError, PlaywrightError):
             continue
-    return False
+    return choices
 
 
-def _choose_sms_login_method(page, timeout_ms: int) -> None:
-    """Нажимает видимую активную кнопку или ссылку со словом «СМС»/«SMS»."""
+def _wait_for_login_button_choices(
+    page,
+    timeout_ms: int,
+) -> list[LoginButtonChoice]:
     deadline = time.monotonic() + timeout_ms / 1000
+    latest: list[LoginButtonChoice] = []
+    latest_labels: tuple[str, ...] = ()
+    stable_since = 0.0
 
     while time.monotonic() < deadline:
-        if _click_visible_control(page, SMS_LOGIN_METHOD_PATTERN):
-            return
-        time.sleep(0.25)
+        choices = _visible_login_button_choices(page)
+        labels = tuple(choice.label for choice in choices)
+        now = time.monotonic()
+        if labels:
+            latest = choices
+            if labels != latest_labels:
+                latest_labels = labels
+                stable_since = now
+            elif now - stable_since >= 1.0:
+                return choices
+        else:
+            latest = []
+            latest_labels = ()
+            stable_since = 0.0
+        time.sleep(0.1)
 
-    raise SessionRecoveryError(
-        "После «Продолжить» не появилась активная кнопка или ссылка со словом «СМС»."
-    )
+    return latest
 
 
 def _first_visible(locator):
@@ -282,6 +301,7 @@ def recreate_profi_session(
     settings: Settings,
     code_provider: Callable[[], str],
     on_sms_requested: Callable[[], None],
+    button_choice_provider: Callable[[list[str]], int],
 ) -> None:
     """Создаёт новый Playwright storage_state через SMS-код."""
     if not settings.profi_login:
@@ -339,11 +359,43 @@ def recreate_profi_session(
             phase = "отправка начальной формы телефона Profi.ru"
             _submit_login_form(initial_login_form, settings.profi_login)
 
-            phase = "выбор входа по сим-пушу или СМС"
-            _choose_sms_login_method(
+            phase = "ожидание кнопок выбора способа входа"
+            button_choices = _wait_for_login_button_choices(
                 page,
                 min(settings.page_timeout_ms, 30_000),
             )
+            if not button_choices:
+                raise SessionRecoveryError(
+                    "После «Продолжить» не появились доступные кнопки входа"
+                )
+
+            phase = "ожидание выбора кнопки в Telegram"
+            selected_index = button_choice_provider(
+                [choice.label for choice in button_choices]
+            )
+            if (
+                isinstance(selected_index, bool)
+                or not isinstance(selected_index, int)
+                or selected_index < 0
+                or selected_index >= len(button_choices)
+            ):
+                raise SessionRecoveryError("Получен некорректный номер кнопки")
+
+            selected_choice = button_choices[selected_index]
+            selected_control = selected_choice.locator
+            if not selected_control.is_visible() or not selected_control.is_enabled():
+                raise SessionRecoveryError(
+                    f"Выбранная кнопка «{selected_choice.label}» стала недоступна"
+                )
+            current_label = _control_label(selected_control)
+            if current_label != selected_choice.label:
+                raise SessionRecoveryError(
+                    "Список кнопок на странице изменился до получения ответа. "
+                    "Запустите /renew ещё раз."
+                )
+
+            phase = f"нажатие выбранной кнопки «{selected_choice.label}»"
+            selected_control.click()
 
             # В некоторых вариантах интерфейса выбранный способ сразу использует
             # уже введённый номер, в других показывает форму телефона повторно.
@@ -470,7 +522,10 @@ class SessionRecoveryManager:
         self.settings = settings
         self.bot = bot
         self.log = log
+        self.awaiting_login_choice = False
+        self.login_button_choices: tuple[str, ...] = ()
         self.awaiting_code = False
+        self._login_choice_queue: Queue[int | str] = Queue(maxsize=1)
         self._code_queue: Queue[str] = Queue(maxsize=1)
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -489,14 +544,14 @@ class SessionRecoveryManager:
         return await self.audience.send(self.bot, text)
 
     async def _send_required(self, text: str) -> None:
-        """Не начинает SMS-вход, пока Telegram недоступен пользователю."""
+        """Не продолжает вход, пока Telegram недоступен пользователю."""
         while True:
             if not self.audience.has_recipients:
                 await self.audience.wait_until_available()
             if await self._send(text):
                 return
             self.log.warning(
-                "Telegram недоступен; откладываю запрос SMS-кода на 5 секунд"
+                "Telegram недоступен; откладываю следующий шаг входа на 5 секунд"
             )
             await asyncio.sleep(5)
 
@@ -504,6 +559,13 @@ class SessionRecoveryManager:
         while True:
             try:
                 self._code_queue.get_nowait()
+            except Empty:
+                return
+
+    def _clear_login_choice_queue(self) -> None:
+        while True:
+            try:
+                self._login_choice_queue.get_nowait()
             except Empty:
                 return
 
@@ -528,16 +590,50 @@ class SessionRecoveryManager:
                 )
                 return False
 
+            self._clear_login_choice_queue()
             self._clear_code_queue()
+            self.awaiting_login_choice = False
+            self.login_button_choices = ()
             self.awaiting_code = False
             self._session_ready.clear()
             self._last_started_at = time.monotonic()
             self._task = asyncio.create_task(self._run(reason))
             return True
 
+    async def _announce_login_choices(self, choices: list[str]) -> None:
+        self.login_button_choices = tuple(choices)
+        self.awaiting_login_choice = True
+        numbered_choices = "\n".join(
+            f"{index}. {label}" for index, label in enumerate(choices, start=1)
+        )
+        await self._send_required(
+            "🔘 После ввода телефона Profi.ru показал такие кнопки:\n\n"
+            f"{numbered_choices}\n\n"
+            "Отправьте одним сообщением номер нужной кнопки. "
+            "Браузер нажмёт только выбранный вами вариант.\n\n"
+            "Для отмены используйте /cancel."
+        )
+
+    def _wait_for_login_choice(self) -> int:
+        try:
+            choice = self._login_choice_queue.get(
+                timeout=self.settings.sms_code_timeout_sec
+            )
+        except Empty as exc:
+            raise SessionRecoveryError(
+                "Время ожидания выбора кнопки истекло"
+            ) from exc
+        if choice == CANCEL_RECOVERY:
+            raise SessionRecoveryError("Восстановление отменено пользователем")
+        if not isinstance(choice, int):
+            raise SessionRecoveryError("Получен некорректный номер кнопки")
+        return choice
+
     async def _announce_sms_request(self) -> None:
         if not self._code_queue.empty():
             return
+        self.awaiting_login_choice = False
+        self.login_button_choices = ()
         self.awaiting_code = True
         await self._send(
             "📲 Запрос SMS отправлен в Profi.ru. Как только код придёт, "
@@ -562,9 +658,21 @@ class SessionRecoveryManager:
         await self._send_required(
             "🔐 Сессия Profi.ru требует обновления.\n"
             f"Причина: {reason}\n\n"
-            "Запрашиваю новый SMS-код автоматически…"
+            "Ввожу номер телефона. После этого пришлю найденные кнопки входа для выбора."
         )
         loop = asyncio.get_running_loop()
+
+        def choose_button_from_thread(choices: list[str]) -> int:
+            future = asyncio.run_coroutine_threadsafe(
+                self._announce_login_choices(choices),
+                loop,
+            )
+            try:
+                future.result(timeout=60)
+            except Exception:
+                future.cancel()
+                raise
+            return self._wait_for_login_choice()
 
         def announce_from_thread() -> None:
             future = asyncio.run_coroutine_threadsafe(
@@ -579,6 +687,7 @@ class SessionRecoveryManager:
                 self.settings,
                 self._wait_for_code,
                 announce_from_thread,
+                choose_button_from_thread,
             )
             self._session_ready.set()
             if self._on_success is not None:
@@ -614,7 +723,33 @@ class SessionRecoveryManager:
                 "Отправьте /renew для повторной попытки."
             )
         finally:
+            self.awaiting_login_choice = False
+            self.login_button_choices = ()
             self.awaiting_code = False
+
+    async def submit_login_choice(self, raw_choice: str) -> tuple[bool, str]:
+        if not self.awaiting_login_choice:
+            return False, "Сейчас бот не ожидает выбор кнопки. Используйте /renew."
+
+        try:
+            choice_number = int(raw_choice.strip())
+        except (AttributeError, ValueError):
+            return False, "Отправьте номер кнопки из показанного списка."
+
+        if not 1 <= choice_number <= len(self.login_button_choices):
+            return (
+                False,
+                f"Выберите номер от 1 до {len(self.login_button_choices)}.",
+            )
+
+        selected_label = self.login_button_choices[choice_number - 1]
+        try:
+            self._login_choice_queue.put_nowait(choice_number - 1)
+        except Full:
+            return False, "Выбор уже получен и обрабатывается."
+
+        self.awaiting_login_choice = False
+        return True, f"Выбрана кнопка: «{selected_label}». Нажимаю…"
 
     async def submit_code(self, raw_code: str) -> tuple[bool, str]:
         if not self.in_progress and not self.awaiting_code:
@@ -636,7 +771,11 @@ class SessionRecoveryManager:
         if not self.in_progress:
             return False
         with suppress(Full):
+            self._login_choice_queue.put_nowait(CANCEL_RECOVERY)
+        with suppress(Full):
             self._code_queue.put_nowait(CANCEL_RECOVERY)
+        self.awaiting_login_choice = False
+        self.login_button_choices = ()
         self.awaiting_code = False
         return True
 
