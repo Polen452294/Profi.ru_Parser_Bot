@@ -23,6 +23,10 @@ SMS_LOGIN_METHOD_PATTERN = re.compile(
     r"(?:смс|sms)",
     re.IGNORECASE,
 )
+FORBIDDEN_SMS_CONTROL_PATTERN = re.compile(
+    r"(?:мтс|mts|(?:^|\s)id(?:\s|$))",
+    re.IGNORECASE,
+)
 PHONE_INPUT_SELECTOR = (
     'input[type="tel"], '
     'input[autocomplete="tel"], '
@@ -130,19 +134,32 @@ def _page_roots(page) -> list:
 
 
 def _click_visible_control(page, pattern: re.Pattern[str]) -> bool:
-    for root in _page_roots(page):
-        # Ищем слово только в доступном имени кнопки или ссылки. Обычный текст
-        # страницы намеренно не нажимаем, даже если в нём тоже встречается «СМС».
-        for role in ("button", "link"):
-            try:
-                controls = root.get_by_role(role, name=pattern)
-                for index in range(controls.count()):
-                    control = controls.nth(index)
-                    if control.is_visible() and control.is_enabled():
-                        control.click()
-                        return True
-            except (AttributeError, PlaywrightError):
-                continue
+    # Ищем только на исходной верхней странице Profi.ru. Вкладки и iframe
+    # намеренно не просматриваем: внутри МТС ID тоже может встретиться SMS.
+    for role in ("button", "link"):
+        try:
+            controls = page.get_by_role(role, name=pattern)
+            for index in range(controls.count()):
+                control = controls.nth(index)
+                if not control.is_visible() or not control.is_enabled():
+                    continue
+
+                label = ""
+                with suppress(Exception):
+                    label = control.inner_text().strip()
+                if not label:
+                    with suppress(Exception):
+                        label = (control.get_attribute("aria-label") or "").strip()
+
+                if not pattern.search(label):
+                    continue
+                if FORBIDDEN_SMS_CONTROL_PATTERN.search(label):
+                    continue
+
+                control.click()
+                return True
+        except (AttributeError, PlaywrightError):
+            continue
     return False
 
 

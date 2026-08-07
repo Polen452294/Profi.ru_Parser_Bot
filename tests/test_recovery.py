@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from config import Settings
 from session_recovery import (
+    SMS_LOGIN_METHOD_PATTERN,
     SessionRecoveryManager,
     _choose_sms_login_method,
+    _click_visible_control,
     _fill_sms_code,
     _submit_login_form,
     normalize_sms_code,
@@ -83,8 +85,14 @@ class RecoveryTests(unittest.TestCase):
             def is_enabled(self):
                 return True
 
+            def inner_text(self):
+                return self.name
+
+            def get_attribute(self, name):
+                return None
+
             def click(self):
-                if self.name == "Войти через МТС ID":
+                if "MTS" in self.name or "ID" in self.name:
                     raise AssertionError("Кнопка МТС ID не должна нажиматься")
                 events.append("sms")
 
@@ -103,7 +111,7 @@ class RecoveryTests(unittest.TestCase):
                 if role != "button":
                     return Controls([])
                 names = (
-                    "Войти через МТС ID",
+                    "SMS-вход через MTS ID",
                     "Получить код по СМС",
                 )
                 return Controls(
@@ -118,6 +126,29 @@ class RecoveryTests(unittest.TestCase):
             _choose_sms_login_method(page, 1_000)
 
         self.assertEqual(events, ["sms"])
+
+    def test_sms_search_does_not_enter_mts_tabs_or_frames(self):
+        class Controls:
+            def count(self):
+                return 0
+
+        class TrapRoot:
+            def get_by_role(self, role, name):
+                raise AssertionError("Вкладки и iframe МТС нельзя просматривать")
+
+        class Page:
+            frames = [TrapRoot()]
+            main_frame = None
+
+            def __init__(self):
+                self.context = type("Context", (), {"pages": [self, TrapRoot()]})()
+
+            def get_by_role(self, role, name):
+                return Controls()
+
+        self.assertFalse(
+            _click_visible_control(Page(), SMS_LOGIN_METHOD_PATTERN)
+        )
 
     def test_phone_uses_original_direct_fill_method(self):
         events = []
@@ -168,6 +199,14 @@ class RecoveryTests(unittest.TestCase):
 
             def is_enabled(self):
                 return True
+
+            def inner_text(self):
+                if self.kind == "method":
+                    return "Войти по сим-пушу или СМС"
+                return ""
+
+            def get_attribute(self, name):
+                return None
 
             def fill(self, value):
                 events.append(("fill", value))
