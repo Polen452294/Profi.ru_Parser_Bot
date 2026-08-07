@@ -20,11 +20,7 @@ from config import Settings
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
 SMS_LOGIN_METHOD_PATTERN = re.compile(
-    r"войти\s+по\s+сим.{0,3}пушу\s+или\s+смс",
-    re.IGNORECASE,
-)
-OTHER_LOGIN_METHOD_PATTERN = re.compile(
-    r"выбрать\s+другой\s+способ",
+    r"^\s*войти\s+по\s+сим[\s\-‐-―]*пушу\s+или\s+смс\s*$",
     re.IGNORECASE,
 )
 PHONE_INPUT_SELECTOR = (
@@ -114,17 +110,41 @@ def _find_sms_code_root(page, selector: str):
 
 
 def _page_roots(page) -> list:
-    roots = [page]
-    roots.extend(
-        frame
-        for frame in getattr(page, "frames", [])
-        if frame is not getattr(page, "main_frame", None)
-    )
+    pages = [page]
+    context = getattr(page, "context", None)
+    context_pages = getattr(context, "pages", []) if context is not None else []
+    if isinstance(context_pages, (list, tuple)):
+        for context_page in context_pages:
+            if not any(context_page is known_page for known_page in pages):
+                pages.append(context_page)
+
+    roots = []
+    for current_page in pages:
+        roots.append(current_page)
+        roots.extend(
+            frame
+            for frame in getattr(current_page, "frames", [])
+            if frame is not getattr(current_page, "main_frame", None)
+        )
     return roots
 
 
 def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
     for root in _page_roots(page):
+        # Сначала выбираем только интерактивный элемент с точным доступным
+        # именем. Это не позволяет случайно нажать соседнюю кнопку МТС ID.
+        for role in ("button", "link"):
+            try:
+                controls = root.get_by_role(role, name=pattern)
+                for index in range(controls.count()):
+                    control = controls.nth(index)
+                    if control.is_visible() and control.is_enabled():
+                        control.click()
+                        return True
+            except (AttributeError, PlaywrightError):
+                continue
+
+        # Резерв для виджета, где кликабельный текст размечен обычным div.
         try:
             matches = root.get_by_text(pattern)
             for index in range(matches.count()):
@@ -138,23 +158,17 @@ def _click_visible_text(page, pattern: re.Pattern[str]) -> bool:
 
 
 def _choose_sms_login_method(page, timeout_ms: int) -> None:
-    """Выбирает штатный вход Profi.ru по SMS до отправки номера телефона."""
+    """Нажимает только «Войти по сим-пушу или СМС», не затрагивая МТС ID."""
     deadline = time.monotonic() + timeout_ms / 1000
-    other_method_opened = False
 
     while time.monotonic() < deadline:
         if _click_visible_text(page, SMS_LOGIN_METHOD_PATTERN):
             return
-        if not other_method_opened and _click_visible_text(
-            page,
-            OTHER_LOGIN_METHOD_PATTERN,
-        ):
-            other_method_opened = True
         time.sleep(0.25)
 
     raise SessionRecoveryError(
         "Не удалось выбрать «Войти по сим-пушу или СМС». "
-        "Возможно, Profi.ru изменил список способов входа."
+        "Белая кнопка не появилась после нажатия «Продолжить»."
     )
 
 

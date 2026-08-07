@@ -30,11 +30,13 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <script>
                 function showMethods() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
-                    document.body.innerHTML = '<button id="other">Выбрать другой способ</button>';
-                    document.querySelector('#other').onclick = () => {
-                        document.body.innerHTML = '<button id="sms">Войти по сим-пушу или СМС</button>';
-                        document.querySelector('#sms').onclick = showOtp;
-                    };
+                    document.body.innerHTML = `
+                        <button id="mts" onclick="location.href='/mts-id-was-clicked'">
+                            Войти через МТС ID
+                        </button>
+                        <button id="sms">Войти по сим-пушу или СМС</button>
+                    `;
+                    document.querySelector('#sms').onclick = showOtp;
                 }
                 function showOtp() {
                     document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';

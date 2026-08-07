@@ -8,6 +8,7 @@ from unittest.mock import patch
 from config import Settings
 from session_recovery import (
     SessionRecoveryManager,
+    _choose_sms_login_method,
     _fill_sms_code,
     _submit_login_form,
     normalize_sms_code,
@@ -69,6 +70,55 @@ class FakePage:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_sms_method_is_selected_without_clicking_mts_id(self):
+        events = []
+
+        class Control:
+            def __init__(self, name):
+                self.name = name
+
+            def is_visible(self):
+                return True
+
+            def is_enabled(self):
+                return True
+
+            def click(self):
+                if self.name == "Войти через МТС ID":
+                    raise AssertionError("Кнопка МТС ID не должна нажиматься")
+                events.append("sms")
+
+        class Controls:
+            def __init__(self, items):
+                self.items = items
+
+            def count(self):
+                return len(self.items)
+
+            def nth(self, index):
+                return self.items[index]
+
+        class Page:
+            def get_by_role(self, role, name):
+                if role != "button":
+                    return Controls([])
+                names = (
+                    "Войти через МТС ID",
+                    "Войти по сим-пушу или СМС",
+                )
+                return Controls(
+                    [Control(text) for text in names if name.search(text)]
+                )
+
+            def get_by_text(self, pattern):
+                return Controls([])
+
+        page = Page()
+        with patch("session_recovery.time.sleep", return_value=None):
+            _choose_sms_login_method(page, 1_000)
+
+        self.assertEqual(events, ["sms"])
+
     def test_phone_uses_original_direct_fill_method(self):
         events = []
 
@@ -134,9 +184,6 @@ class RecoveryTests(unittest.TestCase):
                 if self.kind == "method":
                     self.page.method_selected = True
                     events.append("sms_method_click")
-                elif self.kind == "other_method":
-                    self.page.other_method_opened = True
-                    events.append("other_method_click")
                 else:
                     events.append("login_click")
 
@@ -161,7 +208,6 @@ class RecoveryTests(unittest.TestCase):
         class Page:
             def __init__(self):
                 self.method_selected = False
-                self.other_method_opened = False
                 self.otp_closed = False
 
             def goto(self, *args, **kwargs):
@@ -173,12 +219,9 @@ class RecoveryTests(unittest.TestCase):
             def get_by_text(self, pattern):
                 if (
                     "войти" in pattern.pattern
-                    and self.other_method_opened
                     and not self.method_selected
                 ):
                     return Inputs(Element(self, "method"))
-                if "выбрать" in pattern.pattern and not self.other_method_opened:
-                    return Inputs(Element(self, "other_method"))
                 return EmptyInputs()
 
             def wait_for_selector(self, selector, **kwargs):
@@ -250,8 +293,7 @@ class RecoveryTests(unittest.TestCase):
                 recreate_profi_session(settings, provide_code, announce)
 
         self.assertLess(events.index(("fill", "+79990000000")), events.index("login_click"))
-        self.assertLess(events.index("login_click"), events.index("other_method_click"))
-        self.assertLess(events.index("other_method_click"), events.index("sms_method_click"))
+        self.assertLess(events.index("login_click"), events.index("sms_method_click"))
         self.assertLess(events.index("login_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
         self.assertLess(events.index("code"), events.index(("fill", "8796")))
