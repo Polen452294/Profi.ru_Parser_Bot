@@ -380,6 +380,11 @@ def recreate_profi_session(
                 LOGIN_POST_CLICK_STATUS_CHECK_SEC,
             )
 
+            # Сразу открываем приём кода в Telegram. Поле на странице может
+            # отрисоваться позже, чем SMS придёт пользователю, поэтому код
+            # безопасно сохраняется в очереди и вводится только после поля.
+            on_sms_requested()
+
             phase = "ожидание поля SMS-кода на Profi.ru"
             otp_wait_ms = min(settings.page_timeout_ms, 30_000)
             otp_root = _wait_for_sms_code_root(
@@ -406,10 +411,6 @@ def recreate_profi_session(
                     "Profi.ru не показал поле SMS-кода даже после обновления формы. "
                     "Чаще всего это означает, что через прокси не загрузился модуль авторизации."
                 )
-
-            # Telegram просит код только после того, как браузер уже готов его принять.
-            # Если пользователь прислал цифры раньше, очередь всё равно сохранит их.
-            on_sms_requested()
 
             phase = "ожидание SMS-кода из Telegram"
             code = code_provider()
@@ -572,10 +573,14 @@ class SessionRecoveryManager:
 
     async def _announce_sms_request(self) -> None:
         if not self._code_queue.empty():
+            await self._send(
+                "📲 Profi.ru открыл этап подтверждения. Отправленный ранее "
+                "4-значный код уже получен и будет введён после появления поля."
+            )
             return
         self.awaiting_code = True
         await self._send(
-            "📲 Поле SMS-кода на Profi.ru готово. Как только код придёт, "
+            "📲 Profi.ru открыл этап подтверждения. Как только код придёт, "
             "отправьте боту ровно 4 цифры "
             f"в течение {self.settings.sms_code_timeout_sec // 60} мин. "
             "После получения браузер введёт их по одной. "
@@ -662,7 +667,7 @@ class SessionRecoveryManager:
             self.awaiting_code = False
 
     async def submit_code(self, raw_code: str) -> tuple[bool, str]:
-        if not self.awaiting_code:
+        if not self.awaiting_code and not self.in_progress:
             return False, "Сейчас бот не ожидает SMS-код. Используйте /renew."
 
         code = normalize_sms_code(raw_code)
@@ -674,8 +679,11 @@ class SessionRecoveryManager:
         except Full:
             return False, "Код уже получен и обрабатывается."
 
+        received_early = not self.awaiting_code
         self.awaiting_code = False
-        return True, "Код получен. Проверяю вход на Profi.ru…"
+        if received_early:
+            return True, "Код получен и сохранён. Введу его, когда поле появится на Profi.ru…"
+        return True, "Код получен. Ввожу его на Profi.ru по одной цифре…"
 
     async def cancel(self) -> bool:
         if not self.in_progress:

@@ -147,7 +147,9 @@ def build_dispatcher(
         if not _accept_message(message, audience):
             return
         text = (message.text or "").strip()
-        if recovery.awaiting_code:
+        if recovery.awaiting_code or (
+            recovery.in_progress and normalize_sms_code(text) is not None
+        ):
             _, response = await recovery.submit_code(text)
             await message.answer(response)
         elif normalize_sms_code(text) is not None:

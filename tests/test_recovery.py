@@ -94,7 +94,7 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertEqual(events, [("fill", "+79990000000")])
 
-    def test_sms_is_requested_only_after_otp_field_becomes_visible(self):
+    def test_sms_is_requested_after_sms_method_and_before_otp_lookup(self):
         events = []
 
         class Element:
@@ -206,6 +206,8 @@ class RecoveryTests(unittest.TestCase):
             def locator(self, selector):
                 if selector == '[data-testid="enter_with_sms_btn"]':
                     return Inputs(Element(self, "sms_method"))
+                if selector == "otp-selector":
+                    events.append("otp_lookup")
                 return Inputs(Element(self, "otp"))
 
         class EmptyInputs:
@@ -289,7 +291,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("mts_method_click", events)
         self.assertNotIn("login_click", events)
         self.assertLess(events.index("sms_method_click"), events.index("announce"))
-        self.assertLess(events.index("announce"), events.index("code"))
+        self.assertLess(events.index("announce"), events.index("otp_lookup"))
+        self.assertLess(events.index("otp_lookup"), events.index("code"))
         self.assertLess(events.index("code"), events.index("otp_focus"))
         self.assertEqual(
             [event for event in events if isinstance(event, tuple) and event[0] == "press"],
@@ -400,7 +403,7 @@ class RecoveryTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_code_is_rejected_until_bot_announces_ready_field(self):
+    def test_early_code_is_buffered_until_sms_field_appears(self):
         async def scenario():
             settings = Settings.load(
                 env_file=None,
@@ -416,13 +419,14 @@ class RecoveryTests(unittest.TestCase):
             try:
                 accepted, message = await manager.submit_code("8796")
 
-                self.assertFalse(accepted)
+                self.assertTrue(accepted)
                 self.assertFalse(manager.awaiting_code)
-                self.assertIn("не ожидает SMS-код", message)
+                self.assertIn("поле появится", message)
                 await manager._announce_sms_request()
-                self.assertTrue(manager.awaiting_code)
+                self.assertFalse(manager.awaiting_code)
                 self.assertEqual(len(bot.messages), 1)
-                self.assertTrue(manager._code_queue.empty())
+                self.assertIn("уже получен", bot.messages[0][1])
+                self.assertEqual(manager._code_queue.get_nowait(), "8796")
             finally:
                 manager._task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
