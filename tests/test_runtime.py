@@ -11,6 +11,25 @@ from tg_formatter import MAX_DESCRIPTION_LENGTH, format_order
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_twelve_hour_message_is_detected_for_ip_rotation(self):
+        class FakeLocator:
+            def inner_text(self, timeout):
+                return "  Можно будет\nповторить   через 12 часов  "
+
+        class FakePage:
+            def locator(self, selector):
+                self.selector = selector
+                return FakeLocator()
+
+        settings = Settings.load(env_file=None, values={})
+        client = ProfiClient(object(), settings)
+        client.page = FakePage()
+
+        reason = client.detect_ip_rotation_limit()
+
+        self.assertIsNotNone(reason)
+        self.assertIn("12 часов", reason)
+
     def test_main_browser_receives_shared_proxy(self):
         class FakeTracing:
             def start(self, **kwargs):
@@ -58,6 +77,7 @@ class RuntimeTests(unittest.TestCase):
                     "LOG_DIR": str(Path(directory) / "logs"),
                     "TELEGRAM_PROXY": "socks5://127.0.0.1:10808",
                     "PROFI_PROXY": "socks5://127.0.0.1:10808",
+                    "PROFI_PROXY_POOL": "http://backup.local:3128",
                     "TRACE_ON_FAILURE": "false",
                 },
             )
@@ -66,11 +86,23 @@ class RuntimeTests(unittest.TestCase):
             with ProfiClient(playwright, settings):
                 pass
 
+            primary_launch_options = playwright.chromium.launch_options
+
+            with ProfiClient(playwright, settings, proxy_index=1):
+                pass
+
+        self.assertEqual(
+            primary_launch_options,
+            {
+                "headless": True,
+                "proxy": {"server": "socks5://127.0.0.1:10808"},
+            },
+        )
         self.assertEqual(
             playwright.chromium.launch_options,
             {
                 "headless": True,
-                "proxy": {"server": "socks5://127.0.0.1:10808"},
+                "proxy": {"server": "http://backup.local:3128"},
             },
         )
 

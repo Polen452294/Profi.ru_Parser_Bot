@@ -26,6 +26,12 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <div>Повторите через 6 часов</div>
                 </body></html>
             """
+        elif self.path.startswith("/ip-limit"):
+            body = """
+                <html><title>Заказы</title><body>
+                <div>Можно будет повторить через 12 часов</div>
+                </body></html>
+            """
         elif self.path.startswith("/recovery"):
             body = """
                 <html><title>Вход на Профи.ру</title><body>
@@ -128,6 +134,11 @@ class FakeProfiIntegrationTests(unittest.TestCase):
                     reason = client.detect_access_challenge()
                     self.assertIsNotNone(reason)
                     self.assertIn("challenge", reason.lower())
+
+                    client.page.goto(f"{self.base_url}/ip-limit")
+                    reason = client.detect_ip_rotation_limit()
+                    self.assertIsNotNone(reason)
+                    self.assertIn("12 часов", reason)
 
                     screenshot, html, trace = client.save_debug("integration")
                     self.assertTrue(screenshot.exists())

@@ -59,7 +59,14 @@ def build_health_report(
     else:
         parser_state = str(heartbeat.get("status") or "нет данных")
 
-    if settings.telegram_proxy and settings.profi_proxy:
+    rotating_profi_routes = len(settings.profi_proxy_pool) > 1
+    if rotating_profi_routes:
+        primary = "прокси" if settings.profi_proxy else "прямой маршрут"
+        proxy_state = (
+            f"Profi.ru: {primary} + пул из {len(settings.profi_proxy_pool)} маршрутов; "
+            f"Telegram: {'прокси' if settings.telegram_proxy else 'напрямую'}"
+        )
+    elif settings.telegram_proxy and settings.profi_proxy:
         proxy_state = "Telegram и Profi.ru через прокси"
     elif settings.telegram_proxy:
         proxy_state = "Telegram через прокси; Profi.ru напрямую"

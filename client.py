@@ -54,11 +54,20 @@ CHALLENGE_TEXT_MARKERS = (
     "just a moment...",
 )
 
+IP_ROTATION_LIMIT_MARKER = "можно будет повторить через 12 часов"
+
 
 class ProfiClient:
-    def __init__(self, playwright: Playwright, settings: Settings):
+    def __init__(
+        self,
+        playwright: Playwright,
+        settings: Settings,
+        *,
+        proxy_index: int = 0,
+    ):
         self.playwright = playwright
         self.settings = settings
+        self.proxy_index = proxy_index % len(settings.profi_proxy_pool)
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
@@ -67,7 +76,11 @@ class ProfiClient:
     def start(self) -> "ProfiClient":
         self.close()
         self.browser = self.playwright.chromium.launch(
-            **self.settings.playwright_launch_options(headless=self.settings.headless)
+            **self.settings.playwright_launch_options(
+                headless=self.settings.headless,
+                proxy_url=self.selected_proxy_url,
+                use_primary_proxy=False,
+            )
         )
 
         context_options: dict[str, object] = {
@@ -86,12 +99,22 @@ class ProfiClient:
             self._tracing_active = True
         self.page = self.context.new_page()
         logger.info(
-            "Браузер запущен. headless=%s, сессия=%s, прокси=%s",
+            "Браузер запущен. headless=%s, сессия=%s, маршрут Profi.ru=%s/%s, прокси=%s",
             self.settings.headless,
             self.settings.auth_state_path.exists(),
-            "включён" if self.settings.playwright_proxy else "выключен",
+            self.proxy_index + 1,
+            len(self.settings.profi_proxy_pool),
+            "включён" if self.selected_proxy_url else "выключен",
         )
         return self
+
+    @property
+    def selected_proxy_url(self) -> str | None:
+        return self.settings.profi_proxy_pool[self.proxy_index]
+
+    @property
+    def next_proxy_index(self) -> int:
+        return (self.proxy_index + 1) % len(self.settings.profi_proxy_pool)
 
     def close(self) -> None:
         if self.page is not None:
@@ -192,6 +215,22 @@ class ProfiClient:
         for marker in CHALLENGE_TEXT_MARKERS:
             if marker in body_text:
                 return f"Страница содержит признак блокировки: {marker}"
+        return None
+
+    def detect_ip_rotation_limit(self) -> str | None:
+        """Распознаёт только лимит, для которого разрешена смена маршрута."""
+        page = self._page()
+        try:
+            visible_text = " ".join(
+                page.locator("body").inner_text(timeout=3_000).lower().split()
+            )
+        except PlaywrightError:
+            return None
+        if IP_ROTATION_LIMIT_MARKER in visible_text:
+            return (
+                "Profi.ru ограничил текущий IP: "
+                "«Можно будет повторить через 12 часов»"
+            )
         return None
 
     def save_debug(self, prefix: str = "debug") -> tuple[Path, Path, Path | None]:

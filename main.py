@@ -59,8 +59,13 @@ def _sleep_after_failure(
     time.sleep(delay)
 
 
-def _start_client(playwright, settings: Settings) -> ProfiClient:
-    client = ProfiClient(playwright, settings).start()
+def _start_client(
+    playwright,
+    settings: Settings,
+    *,
+    proxy_index: int = 0,
+) -> ProfiClient:
+    client = ProfiClient(playwright, settings, proxy_index=proxy_index).start()
     try:
         client.open_board()
     except SiteResponseError as exc:
@@ -84,11 +89,55 @@ def _restart_client(
     playwright,
     settings: Settings,
     reason: str,
+    *,
+    proxy_index: int = 0,
 ) -> ProfiClient:
     logger.warning("Перезапуск браузера: %s", reason)
     if client is not None:
         client.close()
-    return _start_client(playwright, settings)
+    return _start_client(playwright, settings, proxy_index=proxy_index)
+
+
+def _raise_access_challenge(
+    client: ProfiClient,
+    health: SiteHealthReporter,
+    heartbeat: HeartbeatReporter,
+    reason: str,
+    *,
+    debug_prefix: str = "access_challenge",
+) -> None:
+    screenshot_path, _, _ = client.save_debug(debug_prefix)
+    screenshot = str(screenshot_path) if screenshot_path.exists() else None
+    health.access_challenge(reason, screenshot)
+    heartbeat.mark_paused(reason)
+    raise AccessChallengeError(reason)
+
+
+def _restart_after_ip_limit(
+    client: ProfiClient,
+    playwright,
+    settings: Settings,
+    heartbeat: HeartbeatReporter,
+    reason: str,
+    *,
+    proxy_index: int,
+) -> ProfiClient:
+    client.save_debug("ip_rotation_limit")
+    logger.warning(
+        "%s. Переключаю маршрут Profi.ru на %s/%s",
+        reason,
+        proxy_index + 1,
+        len(settings.profi_proxy_pool),
+    )
+    heartbeat.mark_failure(reason)
+    time.sleep(min(10, settings.poll_base_sec))
+    return _restart_client(
+        client,
+        playwright,
+        settings,
+        "12-часовой лимит для текущего IP",
+        proxy_index=proxy_index,
+    )
 
 
 def _page_looks_logged_out(client: ProfiClient) -> bool:
@@ -175,6 +224,8 @@ def run_parser(settings: Settings) -> None:
         )
 
         client: ProfiClient | None = None
+        proxy_index = 0
+        rotations_since_success = 0
         try:
             try:
                 client = _start_client(playwright, settings)
@@ -193,30 +244,62 @@ def run_parser(settings: Settings) -> None:
                 try:
                     client.soft_refresh()
 
+                    ip_limit = client.detect_ip_rotation_limit()
+                    if ip_limit:
+                        if rotations_since_success < len(settings.profi_proxy_pool) - 1:
+                            rotations_since_success += 1
+                            proxy_index = client.next_proxy_index
+                            client = _restart_after_ip_limit(
+                                client,
+                                playwright,
+                                settings,
+                                heartbeat,
+                                ip_limit,
+                                proxy_index=proxy_index,
+                            )
+                            continue
+                        _raise_access_challenge(
+                            client,
+                            health,
+                            heartbeat,
+                            f"{ip_limit}; доступные маршруты исчерпаны",
+                            debug_prefix="ip_rotation_exhausted",
+                        )
+
                     challenge = client.detect_access_challenge()
                     if challenge:
-                        screenshot_path, _, _ = client.save_debug("access_challenge")
-                        screenshot = (
-                            str(screenshot_path) if screenshot_path.exists() else None
-                        )
-                        health.access_challenge(challenge, screenshot)
-                        heartbeat.mark_paused(challenge)
-                        raise AccessChallengeError(challenge)
+                        _raise_access_challenge(client, health, heartbeat, challenge)
 
                     if not client.wait_cards():
+                        ip_limit = client.detect_ip_rotation_limit()
+                        if ip_limit:
+                            if rotations_since_success < len(settings.profi_proxy_pool) - 1:
+                                rotations_since_success += 1
+                                proxy_index = client.next_proxy_index
+                                client = _restart_after_ip_limit(
+                                    client,
+                                    playwright,
+                                    settings,
+                                    heartbeat,
+                                    ip_limit,
+                                    proxy_index=proxy_index,
+                                )
+                                continue
+                            _raise_access_challenge(
+                                client,
+                                health,
+                                heartbeat,
+                                f"{ip_limit}; доступные маршруты исчерпаны",
+                                debug_prefix="ip_rotation_exhausted",
+                            )
                         challenge = client.detect_access_challenge()
                         if challenge:
-                            screenshot_path, _, _ = client.save_debug(
-                                "access_challenge"
+                            _raise_access_challenge(
+                                client,
+                                health,
+                                heartbeat,
+                                challenge,
                             )
-                            screenshot = (
-                                str(screenshot_path)
-                                if screenshot_path.exists()
-                                else None
-                            )
-                            health.access_challenge(challenge, screenshot)
-                            heartbeat.mark_paused(challenge)
-                            raise AccessChallengeError(challenge)
                         if _page_looks_logged_out(client):
                             message = "Сессия Profi.ru завершена или сайт запросил вход"
                             health.session_expired(message)
@@ -237,6 +320,7 @@ def run_parser(settings: Settings) -> None:
 
                     health.record_success()
                     heartbeat.mark_success()
+                    rotations_since_success = 0
                     new_orders = _collect_matching_orders(
                         client,
                         seen_ids,
@@ -286,7 +370,13 @@ def run_parser(settings: Settings) -> None:
                     health.record_failure(f"Ошибка браузера: {exc}")
                     heartbeat.mark_failure(f"Ошибка браузера: {exc}")
                     _sleep_after_failure(settings, health.consecutive_errors)
-                    client = _restart_client(client, playwright, settings, str(exc))
+                    client = _restart_client(
+                        client,
+                        playwright,
+                        settings,
+                        str(exc),
+                        proxy_index=proxy_index,
+                    )
                     continue
                 except Exception as exc:
                     health.record_failure(f"Ошибка получения заказов: {exc}")
@@ -298,6 +388,7 @@ def run_parser(settings: Settings) -> None:
                         playwright,
                         settings,
                         "ошибка цикла мониторинга",
+                        proxy_index=proxy_index,
                     )
                     continue
 

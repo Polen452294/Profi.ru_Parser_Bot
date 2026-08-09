@@ -122,6 +122,50 @@ class SettingsTests(unittest.TestCase):
             {"server": "http://proxy.local:3128"},
         )
 
+    def test_profi_proxy_pool_keeps_primary_and_removes_duplicates(self):
+        settings = Settings.load(
+            env_file=None,
+            values={
+                "PROFI_PROXY": "direct",
+                "PROFI_PROXY_POOL": (
+                    "socks5://proxy-one.local:1080, "
+                    "http://user:pass@proxy-two.local:3128, "
+                    "direct, socks5://proxy-one.local:1080"
+                ),
+            },
+        )
+
+        self.assertEqual(
+            settings.profi_proxy_pool,
+            (
+                None,
+                "socks5://proxy-one.local:1080",
+                "http://user:pass@proxy-two.local:3128",
+            ),
+        )
+        self.assertEqual(
+            settings.playwright_launch_options(
+                headless=True,
+                proxy_url=settings.profi_proxy_pool[2],
+                use_primary_proxy=False,
+            ),
+            {
+                "headless": True,
+                "proxy": {
+                    "server": "http://proxy-two.local:3128",
+                    "username": "user",
+                    "password": "pass",
+                },
+            },
+        )
+
+    def test_invalid_profi_proxy_pool_entry_is_rejected(self):
+        with self.assertRaisesRegex(ConfigurationError, "PROFI_PROXY_POOL"):
+            Settings.load(
+                env_file=None,
+                values={"PROFI_PROXY_POOL": "socks5://missing-port.local"},
+            )
+
     def test_invalid_proxy_is_rejected_early(self):
         invalid_values = (
             "127.0.0.1:10808",

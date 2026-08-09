@@ -97,6 +97,29 @@ def _parse_proxy_url(values: Mapping[str, str], name: str) -> str | None:
     return raw_value
 
 
+def _parse_profi_proxy_pool(
+    values: Mapping[str, str],
+    primary_proxy: str | None,
+) -> tuple[str | None, ...]:
+    """Возвращает маршруты Chromium: основной и резервные без дублей."""
+    routes: list[str | None] = [primary_proxy]
+    raw_pool = values.get("PROFI_PROXY_POOL", "")
+    for raw_route in raw_pool.split(","):
+        route = raw_route.strip()
+        if not route:
+            continue
+        if route.lower() == "direct":
+            parsed_route = None
+        else:
+            parsed_route = _parse_proxy_url(
+                {"PROFI_PROXY_POOL": route},
+                "PROFI_PROXY_POOL",
+            )
+        if parsed_route not in routes:
+            routes.append(parsed_route)
+    return tuple(routes)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     project_dir: Path
@@ -143,6 +166,7 @@ class Settings:
     telegram_proxy: str | None
     telegram_proxy_rdns: bool
     profi_proxy: str | None
+    profi_proxy_pool: tuple[str | None, ...]
     bot_poll_sec: int
     restart_delay_sec: int
     max_restarts: int
@@ -179,6 +203,7 @@ class Settings:
             profi_proxy = _parse_proxy_url(values, "PROFI_PROXY")
         else:
             profi_proxy = None
+        profi_proxy_pool = _parse_profi_proxy_pool(values, profi_proxy)
 
         return cls(
             project_dir=project_dir,
@@ -307,6 +332,7 @@ class Settings:
                 True,
             ),
             profi_proxy=profi_proxy,
+            profi_proxy_pool=profi_proxy_pool,
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),
             max_restarts=_parse_int(values, "MAX_RESTARTS", 50, minimum=1),
@@ -349,10 +375,14 @@ class Settings:
     @property
     def playwright_proxy(self) -> dict[str, str] | None:
         """Преобразует URL прокси Profi.ru в формат запуска Playwright."""
-        if not self.profi_proxy:
+        return self.playwright_proxy_for(self.profi_proxy)
+
+    @staticmethod
+    def playwright_proxy_for(proxy_url: str | None) -> dict[str, str] | None:
+        if not proxy_url:
             return None
 
-        parsed = urlsplit(self.profi_proxy)
+        parsed = urlsplit(proxy_url)
         hostname = parsed.hostname or ""
         host = f"[{hostname}]" if ":" in hostname else hostname
         options = {
@@ -364,9 +394,16 @@ class Settings:
             options["password"] = unquote(parsed.password)
         return options
 
-    def playwright_launch_options(self, *, headless: bool) -> dict[str, object]:
+    def playwright_launch_options(
+        self,
+        *,
+        headless: bool,
+        proxy_url: str | None = None,
+        use_primary_proxy: bool = True,
+    ) -> dict[str, object]:
         options: dict[str, object] = {"headless": headless}
-        proxy = self.playwright_proxy
+        selected_proxy = self.profi_proxy if use_primary_proxy else proxy_url
+        proxy = self.playwright_proxy_for(selected_proxy)
         if proxy:
             options["proxy"] = proxy
         else:
