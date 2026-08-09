@@ -15,6 +15,14 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.orders_path, PROJECT_DIR / "data" / "new_orders.jsonl")
         self.assertTrue(settings.headless)
 
+    def test_default_sms_code_selector_uses_exact_pin_test_id(self):
+        settings = Settings.load(env_file=None, values={})
+
+        self.assertEqual(
+            settings.profi_otp_selector,
+            '[data-testid="auth_pin_input"]',
+        )
+
     def test_relative_custom_paths_are_resolved_from_project(self):
         settings = Settings.load(
             env_file=None,

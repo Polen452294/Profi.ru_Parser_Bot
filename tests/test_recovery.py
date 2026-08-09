@@ -10,8 +10,8 @@ from session_recovery import (
     LoginRetryLaterError,
     SessionRecoveryManager,
     _fill_login_input,
+    _fill_sms_code,
     _find_login_retry_later_text,
-    _type_sms_code_digit_by_digit,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -46,7 +46,7 @@ class FakeInput:
         return True
 
     def fill(self, value):
-        raise AssertionError("SMS-код нельзя вставлять через fill()")
+        self.value = value
 
     def click(self):
         self.clicks += 1
@@ -71,8 +71,10 @@ class FakeInputs:
 class FakePage:
     def __init__(self, input_count):
         self.inputs = FakeInputs(input_count)
+        self.seen_selectors = []
 
     def locator(self, selector):
+        self.seen_selectors.append(selector)
         return self.inputs
 
 
@@ -143,6 +145,8 @@ class RecoveryTests(unittest.TestCase):
                 events.append(("fill", value))
                 if self.kind == "login_input":
                     self.page.phone_filled = True
+                elif self.kind == "otp" and len(value) == 4:
+                    self.page.otp_closed = True
 
             def input_value(self):
                 return self.value
@@ -206,7 +210,10 @@ class RecoveryTests(unittest.TestCase):
             def locator(self, selector):
                 if selector == '[data-testid="enter_with_sms_btn"]':
                     return Inputs(Element(self, "sms_method"))
-                if selector == "otp-selector":
+                if selector in {
+                    '[data-testid="auth_pin_input"]',
+                    "otp-selector",
+                }:
                     events.append("otp_lookup")
                 return Inputs(Element(self, "otp"))
 
@@ -293,12 +300,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertLess(events.index("sms_method_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("otp_lookup"))
         self.assertLess(events.index("otp_lookup"), events.index("code"))
-        self.assertLess(events.index("code"), events.index("otp_focus"))
-        self.assertEqual(
-            [event for event in events if isinstance(event, tuple) and event[0] == "press"],
-            [("press", "8"), ("press", "7"), ("press", "9"), ("press", "6")],
-        )
-        self.assertNotIn(("fill", "8796"), events)
+        self.assertLess(events.index("code"), events.index(("fill", "8796")))
+        self.assertEqual(events.count(("fill", "8796")), 1)
         self.assertNotIn(("press", "Enter"), events)
 
     def test_sms_code_normalization(self):
@@ -456,40 +459,24 @@ class RecoveryTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_single_sms_input_receives_four_separate_key_presses(self):
+    def test_sms_code_is_filled_once_into_exact_pin_input(self):
         page = FakePage(input_count=1)
 
-        with patch("session_recovery.time.sleep") as sleep_mock:
-            _type_sms_code_digit_by_digit(page, "unused", "1234")
+        _fill_sms_code(page, "unused", "1234")
 
         self.assertEqual(page.inputs.items[0].value, "1234")
-        self.assertEqual(page.inputs.items[0].pressed, ["1", "2", "3", "4"])
-        self.assertEqual(page.inputs.items[0].clicks, 1)
-        self.assertEqual(sleep_mock.call_count, 3)
-        self.assertNotIn("Enter", page.inputs.items[0].pressed)
+        self.assertEqual(page.inputs.items[0].pressed, [])
+        self.assertEqual(page.inputs.items[0].clicks, 0)
+        self.assertEqual(
+            page.seen_selectors[0],
+            '[data-testid="auth_pin_input"]',
+        )
 
     def test_sms_input_rejects_code_that_is_not_exactly_four_digits(self):
         page = FakePage(input_count=1)
 
         with self.assertRaisesRegex(Exception, "ровно 4 цифры"):
-            _type_sms_code_digit_by_digit(page, "unused", "123456")
-
-    def test_segmented_sms_inputs_receive_one_digit_each(self):
-        page = FakePage(input_count=4)
-
-        with patch("session_recovery.time.sleep") as sleep_mock:
-            _type_sms_code_digit_by_digit(page, "unused", "1234")
-
-        self.assertEqual(
-            [item.value for item in page.inputs.items],
-            list("1234"),
-        )
-        self.assertEqual(
-            [item.pressed for item in page.inputs.items],
-            [["1"], ["2"], ["3"], ["4"]],
-        )
-        self.assertEqual([item.clicks for item in page.inputs.items], [1, 1, 1, 1])
-        self.assertEqual(sleep_mock.call_count, 3)
+            _fill_sms_code(page, "unused", "123456")
 
 
 if __name__ == "__main__":

@@ -384,14 +384,7 @@ class Settings:
             profi_login=values.get("PROFI_LOGIN", "").strip(),
             profi_otp_selector=values.get(
                 "PROFI_OTP_SELECTOR",
-                (
-                    '[data-testid="auth_sms_code_input"], '
-                    'input[data-testid*="sms"][data-testid*="code"], '
-                    'input[data-testid*="code"], '
-                    'input[autocomplete="one-time-code"], '
-                    'input[name*="code"], '
-                    'input[inputmode="numeric"]'
-                ),
+                '[data-testid="auth_pin_input"]',
             ).strip(),
             sms_code_timeout_sec=_parse_int(
                 values,

@@ -56,8 +56,8 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 });
                 function showOtp() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
-                    document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
-                    const otp = document.querySelector('[data-testid="auth_sms_code_input"]');
+                    document.body.innerHTML = '<input data-testid="auth_pin_input" autocomplete="one-time-code">';
+                    const otp = document.querySelector('[data-testid="auth_pin_input"]');
                     otp.addEventListener('input', () => {
                         if (otp.value === '1234') {
                             document.title = 'Заказы';
