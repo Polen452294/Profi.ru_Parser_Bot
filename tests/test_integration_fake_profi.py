@@ -52,8 +52,8 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
                     document.body.innerHTML = '<input data-testid="auth_sms_code_input" autocomplete="one-time-code">';
                     const otp = document.querySelector('[data-testid="auth_sms_code_input"]');
-                    otp.addEventListener('keydown', event => {
-                        if (event.key === 'Enter' && otp.value === '1234') {
+                    otp.addEventListener('input', () => {
+                        if (otp.value === '1234') {
                             document.title = 'Заказы';
                             document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
                         }

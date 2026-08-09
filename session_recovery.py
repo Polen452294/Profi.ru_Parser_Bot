@@ -18,7 +18,8 @@ from config import Settings
 
 
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
-SMS_CODE_PATTERN = re.compile(r"^\d{4,8}$")
+SMS_CODE_PATTERN = re.compile(r"^\d{4}$")
+SMS_DIGIT_DELAY_SEC = 0.2
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
 SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
     r"войти\s+по\s+сим[\s‑–—-]*пушу\s+или\s+(?:смс|sms)",
@@ -51,7 +52,7 @@ class LoginRetryLaterError(SessionRecoveryError):
 
 
 def normalize_sms_code(value: str) -> str | None:
-    code = re.sub(r"[\s-]", "", value or "")
+    code = (value or "").strip()
     return code if SMS_CODE_PATTERN.fullmatch(code) else None
 
 
@@ -267,53 +268,32 @@ def _looks_like_login_page(page) -> bool:
     return "вход" in title or "login" in title or "/login" in url
 
 
-def _set_sms_input_value(input_locator, value: str) -> None:
-    input_locator.fill(value)
-    try:
-        actual_value = input_locator.input_value()
-    except AttributeError:
-        return
-    except PlaywrightError:
-        # Некоторые формы отправляются сразу после последней цифры и удаляют поле.
-        return
+def _type_sms_code_digit_by_digit(root, selector: str, code: str) -> None:
+    if not SMS_CODE_PATTERN.fullmatch(code):
+        raise SessionRecoveryError("SMS-код должен содержать ровно 4 цифры")
 
-    if re.sub(r"\D", "", actual_value) == value:
-        return
-
-    with suppress(PlaywrightError):
-        input_locator.click()
-    with suppress(PlaywrightError):
-        input_locator.press("Control+A")
-        input_locator.press("Backspace")
-    input_locator.type(value, delay=100)
-
-    try:
-        typed_value = input_locator.input_value()
-    except PlaywrightError:
-        return
-    if re.sub(r"\D", "", typed_value) != value:
-        raise SessionRecoveryError("Поле SMS-кода не приняло введённые цифры")
-
-
-def _fill_sms_code(root, selector: str, code: str) -> None:
     visible_inputs = _visible_sms_inputs(root, selector)
 
     if not visible_inputs:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
     if len(visible_inputs) == 1:
-        _set_sms_input_value(visible_inputs[0], code)
-        with suppress(PlaywrightError):
-            visible_inputs[0].press("Enter")
+        input_locator = visible_inputs[0]
+        input_locator.click()
+        for index, digit in enumerate(code):
+            input_locator.press(digit)
+            if index < len(code) - 1:
+                time.sleep(SMS_DIGIT_DELAY_SEC)
         return
 
     if len(visible_inputs) < len(code):
         raise SessionRecoveryError("Количество полей не соответствует длине SMS-кода")
 
-    for input_locator, digit in zip(visible_inputs, code):
-        _set_sms_input_value(input_locator, digit)
-    with suppress(PlaywrightError):
-        visible_inputs[min(len(code), len(visible_inputs)) - 1].press("Enter")
+    for index, (input_locator, digit) in enumerate(zip(visible_inputs, code)):
+        input_locator.click()
+        input_locator.press(digit)
+        if index < len(code) - 1:
+            time.sleep(SMS_DIGIT_DELAY_SEC)
 
 
 def recreate_profi_session(
@@ -440,7 +420,11 @@ def recreate_profi_session(
                 raise SessionRecoveryError("Получен некорректный SMS-код")
 
             phase = "ввод SMS-кода"
-            _fill_sms_code(otp_root, settings.profi_otp_selector, normalized_code)
+            _type_sms_code_digit_by_digit(
+                otp_root,
+                settings.profi_otp_selector,
+                normalized_code,
+            )
 
             phase = "проверка принятия SMS-кода"
             if not _wait_for_sms_code_to_close(
@@ -592,8 +576,9 @@ class SessionRecoveryManager:
         self.awaiting_code = True
         await self._send(
             "📲 Поле SMS-кода на Profi.ru готово. Как только код придёт, "
-            "отправьте боту только его цифры "
+            "отправьте боту ровно 4 цифры "
             f"в течение {self.settings.sms_code_timeout_sec // 60} мин. "
+            "После получения браузер введёт их по одной. "
             "Если пришло несколько сообщений, отправьте самый последний код.\n\n"
             "Для отмены используйте /cancel."
         )
@@ -677,12 +662,12 @@ class SessionRecoveryManager:
             self.awaiting_code = False
 
     async def submit_code(self, raw_code: str) -> tuple[bool, str]:
-        if not self.in_progress and not self.awaiting_code:
+        if not self.awaiting_code:
             return False, "Сейчас бот не ожидает SMS-код. Используйте /renew."
 
         code = normalize_sms_code(raw_code)
         if code is None:
-            return False, "Код должен содержать от 4 до 8 цифр."
+            return False, "Код должен содержать ровно 4 цифры."
 
         try:
             self._code_queue.put_nowait(code)
