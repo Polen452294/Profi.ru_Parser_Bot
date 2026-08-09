@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from config import Settings
 from session_recovery import (
@@ -289,7 +289,7 @@ class RecoveryTests(unittest.TestCase):
                     announce,
                 )
 
-            sleep_mock.assert_any_call(1.0)
+            self.assertEqual(sleep_mock.call_args_list.count(call(1.0)), 2)
 
         self.assertLess(
             events.index(("fill", "+79990000000")),

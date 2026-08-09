@@ -28,6 +28,7 @@ SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
 SMS_LOGIN_BUTTON_STABLE_POLLS = 3
 LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
 LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
+OTP_FIELD_RENDER_DELAY_SEC = 1.0
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"повторите\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
@@ -377,6 +378,9 @@ def recreate_profi_session(
             # безопасно сохраняется в очереди и вводится только после поля.
             on_sms_requested()
 
+            phase = "пауза перед поиском поля SMS-кода"
+            time.sleep(OTP_FIELD_RENDER_DELAY_SEC)
+
             phase = "ожидание поля SMS-кода на Profi.ru"
             otp_wait_ms = min(settings.page_timeout_ms, 30_000)
             otp_root = _wait_for_sms_code_root(
@@ -393,6 +397,7 @@ def recreate_profi_session(
                     wait_until="domcontentloaded",
                     timeout=settings.page_timeout_ms,
                 )
+                time.sleep(OTP_FIELD_RENDER_DELAY_SEC)
                 otp_root = _wait_for_sms_code_root(
                     page,
                     settings.profi_otp_selector,
