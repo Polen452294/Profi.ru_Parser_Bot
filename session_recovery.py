@@ -25,7 +25,13 @@ SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SMS_LOGIN_BUTTON_STABLE_POLLS = 3
-LOGIN_BUTTON_RENDER_DELAY_SEC = 2.0
+LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
+LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
+LOGIN_RETRY_LATER_PATTERN = re.compile(
+    r"повторите\s+через\s+\d+(?:[.,]\d+)?\s*"
+    r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
+    re.IGNORECASE,
+)
 PHONE_INPUT_SELECTOR = (
     'input[type="tel"], '
     'input[autocomplete="tel"], '
@@ -40,9 +46,38 @@ class SessionRecoveryError(RuntimeError):
         self.screenshot_path = screenshot_path
 
 
+class LoginRetryLaterError(SessionRecoveryError):
+    """Profi.ru запретил новый запрос входа до указанного срока."""
+
+
 def normalize_sms_code(value: str) -> str | None:
     code = re.sub(r"[\s-]", "", value or "")
     return code if SMS_CODE_PATTERN.fullmatch(code) else None
+
+
+def _find_login_retry_later_text(page) -> str | None:
+    try:
+        body_text = page.locator("body").inner_text(timeout=1_000)
+    except (AttributeError, PlaywrightError):
+        return None
+    match = LOGIN_RETRY_LATER_PATTERN.search(" ".join(body_text.split()))
+    return match.group(0) if match else None
+
+
+def _raise_if_login_retry_later(page) -> None:
+    retry_text = _find_login_retry_later_text(page)
+    if retry_text:
+        raise LoginRetryLaterError(
+            f"Profi.ru ограничил повторный вход: «{retry_text}»"
+        )
+
+
+def _watch_for_login_retry_later(page, duration_sec: float) -> None:
+    deadline = time.monotonic() + duration_sec
+    while time.monotonic() < deadline:
+        _raise_if_login_retry_later(page)
+        time.sleep(0.1)
+    _raise_if_login_retry_later(page)
 
 
 def _save_recovery_debug(
@@ -154,6 +189,7 @@ def _visible_sms_login_button(page):
 def _wait_for_phone_input(page, timeout_ms: int):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
+        _raise_if_login_retry_later(page)
         login_input = _visible_phone_input(page)
         if login_input is not None:
             return login_input
@@ -172,6 +208,7 @@ def _wait_for_stable_sms_login_button(page, timeout_ms: int):
     stable_polls = 0
     latest = None
     while time.monotonic() < deadline:
+        _raise_if_login_retry_later(page)
         control = _visible_sms_login_button(page)
         if control is None:
             stable_polls = 0
@@ -201,6 +238,7 @@ def _click_verified_sms_login_button(control) -> None:
 def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
+        _raise_if_login_retry_later(page)
         root = _find_sms_code_root(page, selector)
         if root is not None:
             return root
@@ -211,6 +249,7 @@ def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
 def _wait_for_sms_code_to_close(page, selector: str, timeout_ms: int) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
+        _raise_if_login_retry_later(page)
         if _find_sms_code_root(page, selector) is None:
             return True
         time.sleep(0.25)
@@ -228,6 +267,34 @@ def _looks_like_login_page(page) -> bool:
     return "вход" in title or "login" in title or "/login" in url
 
 
+def _set_sms_input_value(input_locator, value: str) -> None:
+    input_locator.fill(value)
+    try:
+        actual_value = input_locator.input_value()
+    except AttributeError:
+        return
+    except PlaywrightError:
+        # Некоторые формы отправляются сразу после последней цифры и удаляют поле.
+        return
+
+    if re.sub(r"\D", "", actual_value) == value:
+        return
+
+    with suppress(PlaywrightError):
+        input_locator.click()
+    with suppress(PlaywrightError):
+        input_locator.press("Control+A")
+        input_locator.press("Backspace")
+    input_locator.type(value, delay=100)
+
+    try:
+        typed_value = input_locator.input_value()
+    except PlaywrightError:
+        return
+    if re.sub(r"\D", "", typed_value) != value:
+        raise SessionRecoveryError("Поле SMS-кода не приняло введённые цифры")
+
+
 def _fill_sms_code(root, selector: str, code: str) -> None:
     visible_inputs = _visible_sms_inputs(root, selector)
 
@@ -235,7 +302,7 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
     if len(visible_inputs) == 1:
-        visible_inputs[0].fill(code)
+        _set_sms_input_value(visible_inputs[0], code)
         with suppress(PlaywrightError):
             visible_inputs[0].press("Enter")
         return
@@ -244,7 +311,7 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         raise SessionRecoveryError("Количество полей не соответствует длине SMS-кода")
 
     for input_locator, digit in zip(visible_inputs, code):
-        input_locator.fill(digit)
+        _set_sms_input_value(input_locator, digit)
     with suppress(PlaywrightError):
         visible_inputs[min(len(code), len(visible_inputs)) - 1].press("Enter")
 
@@ -310,6 +377,7 @@ def recreate_profi_session(
 
             phase = "пауза после ввода телефона"
             time.sleep(LOGIN_BUTTON_RENDER_DELAY_SEC)
+            _raise_if_login_retry_later(page)
 
             phase = "ожидание стабильной кнопки входа по сим-пушу или СМС"
             login_button = _wait_for_stable_sms_login_button(
@@ -323,19 +391,14 @@ def recreate_profi_session(
                 )
 
             phase = 'проверка и нажатие data-testid="enter_with_sms_btn"'
+            _raise_if_login_retry_later(page)
             _click_verified_sms_login_button(login_button)
 
-            # SMS часто приходит раньше, чем поле кода становится видимым.
-            # Сначала открываем приём кода в Telegram, затем ждём интерфейс сайта.
-            on_sms_requested()
-
-            phase = "ожидание SMS-кода из Telegram"
-            code = code_provider()
-            if code == CANCEL_RECOVERY:
-                raise SessionRecoveryError("Восстановление отменено пользователем")
-            normalized_code = normalize_sms_code(code)
-            if normalized_code is None:
-                raise SessionRecoveryError("Получен некорректный SMS-код")
+            phase = "проверка ответа сайта после запроса входа"
+            _watch_for_login_retry_later(
+                page,
+                LOGIN_POST_CLICK_STATUS_CHECK_SEC,
+            )
 
             phase = "ожидание поля SMS-кода на Profi.ru"
             otp_wait_ms = min(settings.page_timeout_ms, 30_000)
@@ -363,6 +426,18 @@ def recreate_profi_session(
                     "Profi.ru не показал поле SMS-кода даже после обновления формы. "
                     "Чаще всего это означает, что через прокси не загрузился модуль авторизации."
                 )
+
+            # Telegram просит код только после того, как браузер уже готов его принять.
+            # Если пользователь прислал цифры раньше, очередь всё равно сохранит их.
+            on_sms_requested()
+
+            phase = "ожидание SMS-кода из Telegram"
+            code = code_provider()
+            if code == CANCEL_RECOVERY:
+                raise SessionRecoveryError("Восстановление отменено пользователем")
+            normalized_code = normalize_sms_code(code)
+            if normalized_code is None:
+                raise SessionRecoveryError("Получен некорректный SMS-код")
 
             phase = "ввод SMS-кода"
             _fill_sms_code(otp_root, settings.profi_otp_selector, normalized_code)
@@ -413,6 +488,11 @@ def recreate_profi_session(
                 error=exc,
                 failed_requests=failed_requests,
             )
+            if isinstance(exc, LoginRetryLaterError):
+                raise LoginRetryLaterError(
+                    f"Этап «{phase}»: {exc}",
+                    screenshot_path=screenshot_path,
+                ) from exc
             if isinstance(exc, SessionRecoveryError):
                 raise SessionRecoveryError(
                     f"Этап «{phase}»: {exc}",
@@ -511,7 +591,7 @@ class SessionRecoveryManager:
             return
         self.awaiting_code = True
         await self._send(
-            "📲 Запрос SMS отправлен в Profi.ru. Как только код придёт, "
+            "📲 Поле SMS-кода на Profi.ru готово. Как только код придёт, "
             "отправьте боту только его цифры "
             f"в течение {self.settings.sms_code_timeout_sec // 60} мин. "
             "Если пришло несколько сообщений, отправьте самый последний код.\n\n"
@@ -573,12 +653,20 @@ class SessionRecoveryManager:
                     self.log.exception(
                         "Не удалось отправить диагностический скриншот в Telegram"
                     )
-            await self._send(
-                "❌ Не удалось обновить сессию Profi.ru.\n"
-                f"Причина: {exc}\n\n"
-                "Подробности сохранены в logs/debug/session_recovery_failed.txt и .html. "
-                "Исправьте настройки при необходимости и отправьте /renew для повтора."
-            )
+            if isinstance(exc, LoginRetryLaterError):
+                await self._send(
+                    "⏳ Profi.ru временно ограничил повторный вход.\n"
+                    f"Сообщение сайта: {exc}\n\n"
+                    "Бот остановил вход и не стал повторно нажимать кнопку или "
+                    "запрашивать SMS. Повторите /renew после указанного сайтом срока."
+                )
+            else:
+                await self._send(
+                    "❌ Не удалось обновить сессию Profi.ru.\n"
+                    f"Причина: {exc}\n\n"
+                    "Подробности сохранены в logs/debug/session_recovery_failed.txt и .html. "
+                    "Исправьте настройки при необходимости и отправьте /renew для повтора."
+                )
         except Exception:
             self.log.exception("Непредвиденная ошибка восстановления сессии")
             await self._send(

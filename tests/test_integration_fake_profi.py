@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from client import ProfiClient
 from config import Settings
-from session_recovery import recreate_profi_session
+from session_recovery import LoginRetryLaterError, recreate_profi_session
 
 
 class FakeProfiHandler(BaseHTTPRequestHandler):
@@ -19,6 +19,12 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <html><title>Проверка безопасности</title>
                 <body><div id="captcha-box">Подтвердите, что вы не робот</div></body>
                 </html>
+            """
+        elif self.path.startswith("/recovery-limit"):
+            body = """
+                <html><title>Вход на Профи.ру</title><body>
+                <div>Повторите через 6 часов</div>
+                </body></html>
             """
         elif self.path.startswith("/recovery"):
             body = """
@@ -157,3 +163,30 @@ class FakeProfiIntegrationTests(unittest.TestCase):
 
             self.assertEqual(announcements, ["sms_requested"])
             self.assertTrue(settings.auth_state_path.exists())
+
+    def test_login_retry_limit_is_detected_against_local_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": str(root / "data"),
+                    "LOG_DIR": str(root / "logs"),
+                    "BACKUP_DIR": str(root / "backups"),
+                    "PROFI_PAGE_URL": f"{self.base_url}/recovery-limit",
+                    "PROFI_LOGIN": "+79990000000",
+                    "SESSION_RECOVERY_HEADLESS": "true",
+                    "PAGE_TIMEOUT_SEC": "10",
+                },
+            )
+            announcements = []
+
+            with self.assertRaises(LoginRetryLaterError) as raised:
+                recreate_profi_session(
+                    settings,
+                    lambda: self.fail("SMS-код не должен запрашиваться"),
+                    lambda: announcements.append("sms_requested"),
+                )
+
+            self.assertIn("Повторите через 6 часов", str(raised.exception))
+            self.assertEqual(announcements, [])

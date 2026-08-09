@@ -7,9 +7,11 @@ from unittest.mock import patch
 
 from config import Settings
 from session_recovery import (
+    LoginRetryLaterError,
     SessionRecoveryManager,
     _fill_login_input,
     _fill_sms_code,
+    _find_login_retry_later_text,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -93,6 +95,7 @@ class RecoveryTests(unittest.TestCase):
             def __init__(self, page=None, kind="input"):
                 self.page = page
                 self.kind = kind
+                self.value = ""
 
             def count(self):
                 return 1
@@ -130,20 +133,13 @@ class RecoveryTests(unittest.TestCase):
                 return None
 
             def fill(self, value):
+                self.value = value
                 events.append(("fill", value))
                 if self.kind == "login_input":
                     self.page.phone_filled = True
 
             def input_value(self):
-                phone_values = []
-                for item in events:
-                    if (
-                        isinstance(item, tuple)
-                        and item[0] == "fill"
-                        and item[1].startswith("+")
-                    ):
-                        phone_values.append(item[1])
-                return phone_values[-1] if phone_values else ""
+                return self.value
 
             def click(self):
                 if self.kind == "sms_method":
@@ -264,14 +260,17 @@ class RecoveryTests(unittest.TestCase):
             ), patch(
                 "session_recovery.time.sleep",
                 return_value=None,
-            ) as sleep_mock:
+            ) as sleep_mock, patch(
+                "session_recovery.LOGIN_POST_CLICK_STATUS_CHECK_SEC",
+                0,
+            ):
                 recreate_profi_session(
                     settings,
                     provide_code,
                     announce,
                 )
 
-            sleep_mock.assert_any_call(2.0)
+            sleep_mock.assert_any_call(1.0)
 
         self.assertLess(
             events.index(("fill", "+79990000000")),
@@ -287,6 +286,57 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(normalize_sms_code("12 34-56"), "123456")
         self.assertIsNone(normalize_sms_code("12ab"))
         self.assertIsNone(normalize_sms_code("123"))
+
+    def test_login_retry_later_text_is_detected(self):
+        class Body:
+            def inner_text(self, timeout):
+                return "Слишком много попыток. Повторите через 12 часов"
+
+        class Page:
+            def locator(self, selector):
+                self.assert_body(selector)
+                return Body()
+
+            @staticmethod
+            def assert_body(selector):
+                if selector != "body":
+                    raise AssertionError(selector)
+
+        self.assertEqual(
+            _find_login_retry_later_text(Page()),
+            "Повторите через 12 часов",
+        )
+
+    def test_manager_notifies_user_about_login_retry_limit(self):
+        async def scenario():
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "BOT_TOKEN": "123:abc",
+                    "ADMIN_CHAT_ID": "42",
+                    "PROFI_LOGIN": "+79990000000",
+                },
+            )
+            bot = FakeBot()
+            manager = SessionRecoveryManager(settings, bot, FakeLog())
+
+            async def fail_recovery(*args, **kwargs):
+                raise LoginRetryLaterError(
+                    "Profi.ru ограничил повторный вход: «Повторите через 12 часов»"
+                )
+
+            with patch(
+                "session_recovery.asyncio.to_thread",
+                new=fail_recovery,
+            ):
+                await manager._run("test")
+
+            notification = bot.messages[-1][1]
+            self.assertIn("⏳", notification)
+            self.assertIn("Повторите через 12 часов", notification)
+            self.assertIn("не стал повторно нажимать", notification)
+
+        asyncio.run(scenario())
 
     def test_manager_accepts_code_only_when_requested(self):
         async def scenario():
@@ -390,6 +440,35 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertEqual(page.inputs.items[0].value, "123456")
         self.assertEqual(page.inputs.items[0].pressed, ["Enter"])
+
+    def test_sms_input_falls_back_to_typing_when_fill_is_rejected(self):
+        class ResistantInput(FakeInput):
+            def __init__(self):
+                super().__init__()
+                self.typed = []
+
+            def fill(self, value):
+                self.value = ""
+
+            def input_value(self):
+                return self.value
+
+            def click(self):
+                return None
+
+            def type(self, value, delay=0):
+                self.typed.append((value, delay))
+                self.value = value
+
+        page = FakePage(input_count=1)
+        resistant_input = ResistantInput()
+        page.inputs.items[0] = resistant_input
+
+        _fill_sms_code(page, "unused", "1234")
+
+        self.assertEqual(resistant_input.value, "1234")
+        self.assertEqual(resistant_input.typed, [("1234", 100)])
+        self.assertIn("Enter", resistant_input.pressed)
 
     def test_segmented_sms_inputs_receive_one_digit_each(self):
         page = FakePage(input_count=6)
