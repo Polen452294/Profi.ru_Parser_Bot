@@ -100,20 +100,38 @@ def _parse_proxy_url(values: Mapping[str, str], name: str) -> str | None:
 def _parse_profi_proxy_pool(
     values: Mapping[str, str],
     primary_proxy: str | None,
+    pool_path: Path,
 ) -> tuple[str | None, ...]:
     """Возвращает маршруты Chromium: основной и резервные без дублей."""
     routes: list[str | None] = [primary_proxy]
-    raw_pool = values.get("PROFI_PROXY_POOL", "")
-    for raw_route in raw_pool.split(","):
+    candidates: list[tuple[str, str]] = []
+
+    if pool_path.exists():
+        try:
+            file_lines = pool_path.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ConfigurationError(
+                f"PROFI_PROXY_POOL_FILE: не удалось прочитать {pool_path}"
+            ) from exc
+        for line_number, raw_line in enumerate(file_lines, start=1):
+            route = raw_line.strip()
+            if route and not route.startswith("#"):
+                candidates.append(
+                    (route, f"PROFI_PROXY_POOL_FILE, строка {line_number}")
+                )
+
+    for raw_route in values.get("PROFI_PROXY_POOL", "").split(","):
+        if raw_route.strip():
+            candidates.append((raw_route, "PROFI_PROXY_POOL"))
+
+    for raw_route, source_name in candidates:
         route = raw_route.strip()
-        if not route:
-            continue
         if route.lower() == "direct":
             parsed_route = None
         else:
             parsed_route = _parse_proxy_url(
-                {"PROFI_PROXY_POOL": route},
-                "PROFI_PROXY_POOL",
+                {source_name: route},
+                source_name,
             )
         if parsed_route not in routes:
             routes.append(parsed_route)
@@ -166,6 +184,7 @@ class Settings:
     telegram_proxy: str | None
     telegram_proxy_rdns: bool
     profi_proxy: str | None
+    profi_proxy_pool_path: Path
     profi_proxy_pool: tuple[str | None, ...]
     bot_poll_sec: int
     restart_delay_sec: int
@@ -194,6 +213,11 @@ class Settings:
         log_dir = _resolve_path(project_dir, values.get("LOG_DIR", "logs"))
         backup_dir = _resolve_path(project_dir, values.get("BACKUP_DIR", "backups"))
         debug_dir = log_dir / "debug"
+        raw_proxy_pool_path = values.get("PROFI_PROXY_POOL_FILE", "").strip()
+        profi_proxy_pool_path = _resolve_path(
+            project_dir,
+            raw_proxy_pool_path or str(data_dir / "profi_proxies.txt"),
+        )
 
         proxy = _parse_proxy_url(values, "TELEGRAM_PROXY")
         raw_profi_proxy = values.get("PROFI_PROXY", "").strip()
@@ -203,7 +227,11 @@ class Settings:
             profi_proxy = _parse_proxy_url(values, "PROFI_PROXY")
         else:
             profi_proxy = None
-        profi_proxy_pool = _parse_profi_proxy_pool(values, profi_proxy)
+        profi_proxy_pool = _parse_profi_proxy_pool(
+            values,
+            profi_proxy,
+            profi_proxy_pool_path,
+        )
 
         return cls(
             project_dir=project_dir,
@@ -332,6 +360,7 @@ class Settings:
                 True,
             ),
             profi_proxy=profi_proxy,
+            profi_proxy_pool_path=profi_proxy_pool_path,
             profi_proxy_pool=profi_proxy_pool,
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),
@@ -376,6 +405,11 @@ class Settings:
     def playwright_proxy(self) -> dict[str, str] | None:
         """Преобразует URL прокси Profi.ru в формат запуска Playwright."""
         return self.playwright_proxy_for(self.profi_proxy)
+
+    @property
+    def profi_proxy_rotation_enabled(self) -> bool:
+        """Ротация включена только при наличии резервного маршрута."""
+        return len(self.profi_proxy_pool) > 1
 
     @staticmethod
     def playwright_proxy_for(proxy_url: str | None) -> dict[str, str] | None:
@@ -438,7 +472,11 @@ class Settings:
                 directory.chmod(0o700)
             except OSError:
                 pass
-        for private_file in (DEFAULT_ENV_FILE, self.auth_state_path):
+        for private_file in (
+            DEFAULT_ENV_FILE,
+            self.auth_state_path,
+            self.profi_proxy_pool_path,
+        ):
             if private_file.exists():
                 try:
                     private_file.chmod(0o600)

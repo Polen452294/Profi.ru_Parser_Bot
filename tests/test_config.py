@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 import unittest
 
 from config import ConfigurationError, PROJECT_DIR, Settings
@@ -123,17 +124,19 @@ class SettingsTests(unittest.TestCase):
         )
 
     def test_profi_proxy_pool_keeps_primary_and_removes_duplicates(self):
-        settings = Settings.load(
-            env_file=None,
-            values={
-                "PROFI_PROXY": "direct",
-                "PROFI_PROXY_POOL": (
-                    "socks5://proxy-one.local:1080, "
-                    "http://user:pass@proxy-two.local:3128, "
-                    "direct, socks5://proxy-one.local:1080"
-                ),
-            },
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": directory,
+                    "PROFI_PROXY": "direct",
+                    "PROFI_PROXY_POOL": (
+                        "socks5://proxy-one.local:1080, "
+                        "http://user:pass@proxy-two.local:3128, "
+                        "direct, socks5://proxy-one.local:1080"
+                    ),
+                },
+            )
 
         self.assertEqual(
             settings.profi_proxy_pool,
@@ -143,6 +146,7 @@ class SettingsTests(unittest.TestCase):
                 "http://user:pass@proxy-two.local:3128",
             ),
         )
+        self.assertTrue(settings.profi_proxy_rotation_enabled)
         self.assertEqual(
             settings.playwright_launch_options(
                 headless=True,
@@ -165,6 +169,71 @@ class SettingsTests(unittest.TestCase):
                 env_file=None,
                 values={"PROFI_PROXY_POOL": "socks5://missing-port.local"},
             )
+
+    def test_missing_profi_proxy_pool_disables_ip_rotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": directory,
+                    "PROFI_PROXY": "socks5://primary.local:1080",
+                },
+            )
+
+        self.assertEqual(
+            settings.profi_proxy_pool,
+            ("socks5://primary.local:1080",),
+        )
+        self.assertFalse(settings.profi_proxy_rotation_enabled)
+
+    def test_profi_proxy_pool_is_loaded_from_private_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool_path = Path(directory) / "proxies.txt"
+            pool_path.write_text(
+                "# GProxy export\n"
+                "http://user:pass@proxy-one.local:1000\n"
+                "\n"
+                "socks5://proxy-two.local:1080\n"
+                "http://user:pass@proxy-one.local:1000\n",
+                encoding="utf-8",
+            )
+
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": directory,
+                    "PROFI_PROXY": "direct",
+                    "PROFI_PROXY_POOL_FILE": str(pool_path),
+                },
+            )
+
+        self.assertEqual(settings.profi_proxy_pool_path, pool_path)
+        self.assertEqual(
+            settings.profi_proxy_pool,
+            (
+                None,
+                "http://user:pass@proxy-one.local:1000",
+                "socks5://proxy-two.local:1080",
+            ),
+        )
+        self.assertTrue(settings.profi_proxy_rotation_enabled)
+
+    def test_invalid_proxy_in_pool_file_reports_line_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool_path = Path(directory) / "proxies.txt"
+            pool_path.write_text(
+                "http://valid.local:1000\nsocks5://missing-port.local\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ConfigurationError,
+                "PROFI_PROXY_POOL_FILE, строка 2",
+            ):
+                Settings.load(
+                    env_file=None,
+                    values={"PROFI_PROXY_POOL_FILE": str(pool_path)},
+                )
 
     def test_invalid_proxy_is_rejected_early(self):
         invalid_values = (

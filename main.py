@@ -246,7 +246,11 @@ def run_parser(settings: Settings) -> None:
 
                     ip_limit = client.detect_ip_rotation_limit()
                     if ip_limit:
-                        if rotations_since_success < len(settings.profi_proxy_pool) - 1:
+                        if (
+                            settings.profi_proxy_rotation_enabled
+                            and rotations_since_success
+                            < len(settings.profi_proxy_pool) - 1
+                        ):
                             rotations_since_success += 1
                             proxy_index = client.next_proxy_index
                             client = _restart_after_ip_limit(
@@ -273,7 +277,11 @@ def run_parser(settings: Settings) -> None:
                     if not client.wait_cards():
                         ip_limit = client.detect_ip_rotation_limit()
                         if ip_limit:
-                            if rotations_since_success < len(settings.profi_proxy_pool) - 1:
+                            if (
+                                settings.profi_proxy_rotation_enabled
+                                and rotations_since_success
+                                < len(settings.profi_proxy_pool) - 1
+                            ):
                                 rotations_since_success += 1
                                 proxy_index = client.next_proxy_index
                                 client = _restart_after_ip_limit(

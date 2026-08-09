@@ -59,7 +59,7 @@ def build_health_report(
     else:
         parser_state = str(heartbeat.get("status") or "нет данных")
 
-    rotating_profi_routes = len(settings.profi_proxy_pool) > 1
+    rotating_profi_routes = settings.profi_proxy_rotation_enabled
     if rotating_profi_routes:
         primary = "прокси" if settings.profi_proxy else "прямой маршрут"
         proxy_state = (
