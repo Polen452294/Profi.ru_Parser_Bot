@@ -62,8 +62,13 @@ def build_health_report(
     rotating_profi_routes = settings.profi_proxy_rotation_enabled
     if rotating_profi_routes:
         primary = "прокси" if settings.profi_proxy else "прямой маршрут"
+        start_mode = (
+            "старт через пул"
+            if settings.profi_proxy_start_from_pool
+            else f"старт: {primary}"
+        )
         proxy_state = (
-            f"Profi.ru: {primary} + пул из {len(settings.profi_proxy_pool)} маршрутов; "
+            f"Profi.ru: пул из {len(settings.profi_proxy_pool)} маршрутов, {start_mode}; "
             f"Telegram: {'прокси' if settings.telegram_proxy else 'напрямую'}"
         )
     elif settings.telegram_proxy and settings.profi_proxy:

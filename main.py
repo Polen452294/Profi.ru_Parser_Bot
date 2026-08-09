@@ -224,11 +224,15 @@ def run_parser(settings: Settings) -> None:
         )
 
         client: ProfiClient | None = None
-        proxy_index = 0
+        proxy_index = settings.initial_profi_proxy_index
         rotations_since_success = 0
         try:
             try:
-                client = _start_client(playwright, settings)
+                client = _start_client(
+                    playwright,
+                    settings,
+                    proxy_index=proxy_index,
+                )
             except SiteResponseError as exc:
                 if exc.status == 403:
                     message = "Profi.ru ограничил доступ при открытии страницы: HTTP 403"

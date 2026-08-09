@@ -186,6 +186,7 @@ class Settings:
     profi_proxy: str | None
     profi_proxy_pool_path: Path
     profi_proxy_pool: tuple[str | None, ...]
+    profi_proxy_start_from_pool: bool
     bot_poll_sec: int
     restart_delay_sec: int
     max_restarts: int
@@ -362,6 +363,11 @@ class Settings:
             profi_proxy=profi_proxy,
             profi_proxy_pool_path=profi_proxy_pool_path,
             profi_proxy_pool=profi_proxy_pool,
+            profi_proxy_start_from_pool=_parse_bool(
+                values,
+                "PROFI_PROXY_START_FROM_POOL",
+                False,
+            ),
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),
             max_restarts=_parse_int(values, "MAX_RESTARTS", 50, minimum=1),
@@ -410,6 +416,13 @@ class Settings:
     def profi_proxy_rotation_enabled(self) -> bool:
         """Ротация включена только при наличии резервного маршрута."""
         return len(self.profi_proxy_pool) > 1
+
+    @property
+    def initial_profi_proxy_index(self) -> int:
+        """Выбирает основной маршрут или первый адрес из пула для старта."""
+        if self.profi_proxy_start_from_pool and self.profi_proxy_rotation_enabled:
+            return 1
+        return 0
 
     @staticmethod
     def playwright_proxy_for(proxy_url: str | None) -> dict[str, str] | None:
