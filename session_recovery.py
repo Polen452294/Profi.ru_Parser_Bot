@@ -449,41 +449,9 @@ def recreate_profi_session(
                 LOGIN_POST_CLICK_STATUS_CHECK_SEC,
             )
 
-            # Сразу открываем приём кода в Telegram. Поле на странице может
-            # отрисоваться позже, чем SMS придёт пользователю, поэтому код
-            # безопасно сохраняется в очереди и вводится только после поля.
+            # До получения четырёх цифр не ищем поле и никак с ним не
+            # взаимодействуем. Сначала только открываем приём кода в Telegram.
             on_sms_requested()
-
-            phase = "пауза перед поиском поля SMS-кода"
-            time.sleep(OTP_FIELD_RENDER_DELAY_SEC)
-
-            phase = "ожидание поля SMS-кода на Profi.ru"
-            otp_wait_ms = min(settings.page_timeout_ms, 30_000)
-            otp_root = _wait_for_sms_code_root(
-                page,
-                settings.profi_otp_selector,
-                otp_wait_ms,
-            )
-            if otp_root is None:
-                # Иногда оболочка страницы загружается, а форма авторизации остаётся
-                # на бесконечном индикаторе. Обновляем уже созданную попытку входа,
-                # не нажимая кнопку запроса SMS повторно.
-                phase = "повторная загрузка зависшей формы SMS-кода"
-                page.reload(
-                    wait_until="domcontentloaded",
-                    timeout=settings.page_timeout_ms,
-                )
-                time.sleep(OTP_FIELD_RENDER_DELAY_SEC)
-                otp_root = _wait_for_sms_code_root(
-                    page,
-                    settings.profi_otp_selector,
-                    otp_wait_ms,
-                )
-            if otp_root is None:
-                raise SessionRecoveryError(
-                    "Profi.ru не показал поле SMS-кода даже после обновления формы. "
-                    "Чаще всего это означает, что через прокси не загрузился модуль авторизации."
-                )
 
             phase = "ожидание SMS-кода из Telegram"
             code = code_provider()
@@ -493,18 +461,20 @@ def recreate_profi_session(
             if normalized_code is None:
                 raise SessionRecoveryError("Получен некорректный SMS-код")
 
-            # За время ответа в Telegram React может заменить поле или весь iframe.
-            # Поэтому не используем найденный ранее root, а заново ищем актуальное
-            # редактируемое поле во всех вкладках и фреймах непосредственно перед fill().
-            phase = "повторный поиск актуального поля SMS-кода"
+            phase = "пауза перед первым поиском поля SMS-кода"
+            time.sleep(OTP_FIELD_RENDER_DELAY_SEC)
+
+            # Это первое обращение к форме кода. Ищем актуальное редактируемое
+            # поле во всех вкладках и фреймах только после ответа пользователя.
+            phase = "поиск актуального поля SMS-кода"
             otp_root = _wait_for_sms_code_root(
                 page,
                 settings.profi_otp_selector,
-                min(settings.page_timeout_ms, 10_000),
+                min(settings.page_timeout_ms, 30_000),
             )
             if otp_root is None:
                 raise SessionRecoveryError(
-                    "После получения кода поле auth_pin_input исчезло или недоступно для ввода"
+                    "После получения кода поле auth_pin_input не найдено или недоступно для ввода"
                 )
 
             phase = "ввод SMS-кода"
