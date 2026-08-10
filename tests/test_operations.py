@@ -13,6 +13,8 @@ from health_report import build_health_report
 from instance_lock import AlreadyRunningError, SingleInstanceLock
 from maintenance import create_safe_backup
 from runtime_control import ParserPauseControl
+from run_all import wait_for_active_site_cooldown
+from site_cooldown import activate_site_cooldown
 
 
 class OperationsTests(unittest.TestCase):
@@ -27,6 +29,85 @@ class OperationsTests(unittest.TestCase):
             self.assertTrue(control.resume())
             await asyncio.wait_for(waiter, timeout=1)
             self.assertFalse(control.paused)
+
+        asyncio.run(scenario())
+
+    def test_timed_pause_cannot_be_resumed_early(self):
+        control = ParserPauseControl()
+        control.pause_until("12-hour limit", time.time() + 60)
+
+        self.assertTrue(control.paused)
+        self.assertGreater(control.remaining_seconds, 0)
+        self.assertFalse(control.resume())
+        self.assertTrue(control.paused)
+
+    def test_timed_pause_ends_automatically(self):
+        async def scenario():
+            control = ParserPauseControl()
+            control.pause_until("short test limit", time.time() + 0.02)
+
+            await asyncio.wait_for(control.wait_for_resume(), timeout=1)
+
+            self.assertFalse(control.paused)
+
+        asyncio.run(scenario())
+
+    def test_service_clears_persisted_pause_and_resumes_automatically(self):
+        async def scenario():
+            class FakeAudience:
+                has_recipients = False
+
+                def __init__(self):
+                    self.messages = []
+
+                async def send(self, bot, text):
+                    self.messages.append(text)
+                    return 0
+
+                async def send_photo(self, bot, path, caption):
+                    self.messages.append(caption)
+                    return 0
+
+            class FakeLog:
+                def warning(self, *args):
+                    pass
+
+                def info(self, *args):
+                    pass
+
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                settings = Settings.load(
+                    env_file=None,
+                    values={
+                        "DATA_DIR": str(root / "data"),
+                        "LOG_DIR": str(root / "logs"),
+                    },
+                )
+                settings.ensure_directories()
+                activate_site_cooldown(
+                    settings.site_cooldown_path,
+                    "12-hour test limit",
+                    duration_sec=0.02,
+                )
+                audience = FakeAudience()
+                control = ParserPauseControl()
+
+                waited = await asyncio.wait_for(
+                    wait_for_active_site_cooldown(
+                        settings,
+                        FakeLog(),
+                        object(),
+                        audience,
+                        control,
+                    ),
+                    timeout=2,
+                )
+
+                self.assertTrue(waited)
+                self.assertFalse(settings.site_cooldown_path.exists())
+                self.assertFalse(control.paused)
+                self.assertTrue(any("возобновляю" in text for text in audience.messages))
 
         asyncio.run(scenario())
 

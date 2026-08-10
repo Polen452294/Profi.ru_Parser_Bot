@@ -14,6 +14,7 @@ from health import EVENT_SITE_ERROR, EVENT_SITE_RECOVERED
 from health_report import build_health_report
 from runtime_control import ParserPauseControl
 from session_recovery import SessionRecoveryManager, normalize_sms_code
+from site_cooldown import format_remaining_time
 from storage import (
     compact_jsonl_if_consumed,
     load_cursor,
@@ -91,11 +92,20 @@ def build_dispatcher(
             if settings.auth_state_path.exists()
             else "файл cookies отсутствует"
         )
+        hard_pause_remaining = max(
+            control.remaining_seconds,
+            recovery.site_cooldown_remaining_seconds,
+        )
+        pause_status = (
+            f"обязательная, осталось {format_remaining_time(hard_pause_remaining)}"
+            if hard_pause_remaining
+            else ("да" if control.paused else "нет")
+        )
         await message.answer(
             "ℹ️ Состояние парсера\n\n"
             f"Сессия: {session_status}\n"
             f"Восстановление: {recovery_status}\n"
-            f"Безопасная пауза: {'да' if control.paused else 'нет'}"
+            f"Безопасная пауза: {pause_status}"
         )
 
     @router.message(Command("renew"))
@@ -128,6 +138,16 @@ def build_dispatcher(
     async def cancel_command(message: Message) -> None:
         if not _accept_message(message, audience):
             return
+        hard_pause_remaining = max(
+            control.remaining_seconds,
+            recovery.site_cooldown_remaining_seconds,
+        )
+        if hard_pause_remaining:
+            await message.answer(
+                "Обязательную паузу Profi.ru нельзя отменить раньше срока. "
+                f"Осталось: {format_remaining_time(hard_pause_remaining)}."
+            )
+            return
         if await recovery.cancel():
             await message.answer("Восстановление сессии отменено.")
         else:
@@ -136,6 +156,16 @@ def build_dispatcher(
     @router.message(Command("resume"))
     async def resume_command(message: Message) -> None:
         if not _accept_message(message, audience):
+            return
+        hard_pause_remaining = max(
+            control.remaining_seconds,
+            recovery.site_cooldown_remaining_seconds,
+        )
+        if hard_pause_remaining:
+            await message.answer(
+                "Обязательную паузу Profi.ru нельзя снять раньше срока. "
+                f"Осталось: {format_remaining_time(hard_pause_remaining)}."
+            )
             return
         if control.resume():
             await message.answer("Возобновляю безопасную проверку Profi.ru…")

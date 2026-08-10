@@ -222,6 +222,7 @@ class SettingsTests(unittest.TestCase):
                     "PROFI_PROXY": "direct",
                     "PROFI_PROXY_POOL_FILE": str(pool_path),
                     "PROFI_PROXY_START_FROM_POOL": "true",
+                    "PROFI_PROXY_RANDOM_ON_START": "true",
                 },
             )
 
@@ -236,7 +237,9 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertTrue(settings.profi_proxy_rotation_enabled)
         self.assertTrue(settings.profi_proxy_start_from_pool)
+        self.assertTrue(settings.profi_proxy_random_on_start)
         self.assertEqual(settings.initial_profi_proxy_index, 1)
+        self.assertEqual(settings.initial_profi_proxy_candidates, (1, 2))
 
     def test_start_from_pool_falls_back_to_primary_when_pool_is_empty(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -246,11 +249,13 @@ class SettingsTests(unittest.TestCase):
                     "DATA_DIR": directory,
                     "PROFI_PROXY": "direct",
                     "PROFI_PROXY_START_FROM_POOL": "true",
+                    "PROFI_PROXY_RANDOM_ON_START": "true",
                 },
             )
 
         self.assertFalse(settings.profi_proxy_rotation_enabled)
         self.assertEqual(settings.initial_profi_proxy_index, 0)
+        self.assertEqual(settings.initial_profi_proxy_candidates, (0,))
 
     def test_invalid_proxy_in_pool_file_reports_line_number(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -17,6 +17,7 @@ from health import (
 from heartbeat import HeartbeatReporter
 from logger_setup import setup_logger
 from parser import parse_order_snippet
+from site_cooldown import activate_site_cooldown
 from storage import append_jsonl, load_seen_ids, save_seen_ids
 
 
@@ -29,6 +30,10 @@ class SessionExpiredError(RuntimeError):
 
 class AccessChallengeError(RuntimeError):
     pass
+
+
+def _select_initial_proxy_index(settings: Settings) -> int:
+    return random.choice(settings.initial_profi_proxy_candidates)
 
 
 def _sleep_with_jitter(base_seconds: int, jitter_seconds: int) -> None:
@@ -59,13 +64,7 @@ def _sleep_after_failure(
     time.sleep(delay)
 
 
-def _start_client(
-    playwright,
-    settings: Settings,
-    *,
-    proxy_index: int = 0,
-) -> ProfiClient:
-    client = ProfiClient(playwright, settings, proxy_index=proxy_index).start()
+def _open_started_client(client: ProfiClient) -> ProfiClient:
     try:
         client.open_board()
     except SiteResponseError as exc:
@@ -84,6 +83,16 @@ def _start_client(
     return client
 
 
+def _start_client(
+    playwright,
+    settings: Settings,
+    *,
+    proxy_index: int = 0,
+) -> ProfiClient:
+    client = ProfiClient(playwright, settings, proxy_index=proxy_index).start()
+    return _open_started_client(client)
+
+
 def _restart_client(
     client: ProfiClient | None,
     playwright,
@@ -94,6 +103,10 @@ def _restart_client(
 ) -> ProfiClient:
     logger.warning("Перезапуск браузера: %s", reason)
     if client is not None:
+        target_proxy_index = proxy_index % len(settings.profi_proxy_pool)
+        if target_proxy_index != client.proxy_index:
+            client.switch_proxy_and_identity(target_proxy_index)
+            return _open_started_client(client)
         client.close()
     return _start_client(playwright, settings, proxy_index=proxy_index)
 
@@ -111,6 +124,26 @@ def _raise_access_challenge(
     health.access_challenge(reason, screenshot)
     heartbeat.mark_paused(reason)
     raise AccessChallengeError(reason)
+
+
+def _raise_login_retry_cooldown(
+    client: ProfiClient,
+    settings: Settings,
+    health: SiteHealthReporter,
+    heartbeat: HeartbeatReporter,
+    reason: str,
+) -> None:
+    """Stops all Profi.ru requests for the full limit shown by the site."""
+    screenshot_path, _, _ = client.save_debug("login_retry_cooldown")
+    screenshot = str(screenshot_path) if screenshot_path.exists() else None
+    cooldown = activate_site_cooldown(settings.site_cooldown_path, reason)
+    message = (
+        f"{reason}. Парсер поставлен на обязательную паузу до "
+        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cooldown.until_timestamp))}"
+    )
+    health.access_challenge(message, screenshot)
+    heartbeat.mark_paused(message)
+    raise AccessChallengeError(message)
 
 
 def _restart_after_ip_limit(
@@ -227,8 +260,7 @@ def run_parser(settings: Settings) -> None:
         )
 
         client: ProfiClient | None = None
-        proxy_index = settings.initial_profi_proxy_index
-        rotations_since_success = 0
+        proxy_index = _select_initial_proxy_index(settings)
         try:
             try:
                 client = _start_client(
@@ -253,29 +285,12 @@ def run_parser(settings: Settings) -> None:
 
                     ip_limit = client.detect_ip_rotation_limit()
                     if ip_limit:
-                        if (
-                            settings.profi_proxy_rotation_enabled
-                            and rotations_since_success
-                            < len(settings.profi_proxy_pool) - 1
-                        ):
-                            rotations_since_success += 1
-                            proxy_index = client.next_proxy_index
-                            client = _restart_after_ip_limit(
-                                client,
-                                playwright,
-                                settings,
-                                heartbeat,
-                                ip_limit,
-                                proxy_index=proxy_index,
-                                reset_identity=rotations_since_success > 1,
-                            )
-                            continue
-                        _raise_access_challenge(
+                        _raise_login_retry_cooldown(
                             client,
+                            settings,
                             health,
                             heartbeat,
-                            f"{ip_limit}; доступные маршруты исчерпаны",
-                            debug_prefix="ip_rotation_exhausted",
+                            ip_limit,
                         )
 
                     challenge = client.detect_access_challenge()
@@ -285,29 +300,12 @@ def run_parser(settings: Settings) -> None:
                     if not client.wait_cards():
                         ip_limit = client.detect_ip_rotation_limit()
                         if ip_limit:
-                            if (
-                                settings.profi_proxy_rotation_enabled
-                                and rotations_since_success
-                                < len(settings.profi_proxy_pool) - 1
-                            ):
-                                rotations_since_success += 1
-                                proxy_index = client.next_proxy_index
-                                client = _restart_after_ip_limit(
-                                    client,
-                                    playwright,
-                                    settings,
-                                    heartbeat,
-                                    ip_limit,
-                                    proxy_index=proxy_index,
-                                    reset_identity=rotations_since_success > 1,
-                                )
-                                continue
-                            _raise_access_challenge(
+                            _raise_login_retry_cooldown(
                                 client,
+                                settings,
                                 health,
                                 heartbeat,
-                                f"{ip_limit}; доступные маршруты исчерпаны",
-                                debug_prefix="ip_rotation_exhausted",
+                                ip_limit,
                             )
                         challenge = client.detect_access_challenge()
                         if challenge:
@@ -337,7 +335,6 @@ def run_parser(settings: Settings) -> None:
 
                     health.record_success()
                     heartbeat.mark_success()
-                    rotations_since_success = 0
                     new_orders = _collect_matching_orders(
                         client,
                         seen_ids,

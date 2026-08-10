@@ -21,6 +21,11 @@ from logger_setup import setup_logger
 from maintenance import maintenance_loop
 from runtime_control import ParserPauseControl
 from session_recovery import SessionRecoveryManager
+from site_cooldown import (
+    clear_site_cooldown,
+    format_remaining_time,
+    load_site_cooldown,
+)
 from storage import (
     compact_jsonl_if_consumed,
     load_cursor,
@@ -100,6 +105,59 @@ async def pipe_process_output(process: Process, log) -> None:
 
     while line := await process.stdout.readline():
         log.info("[ПАРСЕР] %s", line.decode("utf-8", errors="replace").rstrip())
+
+
+async def wait_for_active_site_cooldown(
+    settings: Settings,
+    log,
+    bot: Bot,
+    audience: TelegramAudience,
+    control: ParserPauseControl,
+) -> bool:
+    """Waits out the persisted Profi.ru limit while Telegram stays available."""
+    cooldown = load_site_cooldown(settings.site_cooldown_path)
+    if cooldown is None:
+        return False
+
+    remaining = cooldown.remaining_seconds()
+    control.pause_until(cooldown.reason, cooldown.until_timestamp)
+    resume_at = time.strftime(
+        "%d.%m.%Y %H:%M:%S",
+        time.localtime(cooldown.until_timestamp),
+    )
+    log.warning(
+        "Profi.ru ограничил повторный вход; пауза ещё %s, до %s",
+        format_remaining_time(remaining),
+        resume_at,
+    )
+
+    caption = (
+        "⏸ Profi.ru сообщил: «Слишком много попыток. Можно будет повторить "
+        "через 12 часов».\n\n"
+        "Парсер полностью прекратил обращения к сайту. "
+        f"Осталось: {format_remaining_time(remaining)}.\n"
+        f"Автоматическое возобновление: {resume_at}.\n\n"
+        "Команда /resume не снимает это ограничение раньше срока."
+    )
+    screenshots = list(settings.debug_dir.glob("login_retry_cooldown_*.png"))
+    screenshot = (
+        max(screenshots, key=lambda path: path.stat().st_mtime)
+        if screenshots
+        else None
+    )
+    if screenshot is not None:
+        await audience.send_photo(bot, str(screenshot), caption)
+    else:
+        await audience.send(bot, caption)
+
+    await control.wait_for_resume()
+    clear_site_cooldown(settings.site_cooldown_path)
+    await audience.send(
+        bot,
+        "▶️ 12-часовая пауза завершена. Автоматически возобновляю работу парсера.",
+    )
+    log.info("12-часовая пауза Profi.ru завершена; запускаю парсер")
+    return True
 
 
 async def send_order_message(
@@ -199,6 +257,13 @@ async def supervise_parser(
 
     try:
         while True:
+            await wait_for_active_site_cooldown(
+                settings,
+                log,
+                bot,
+                audience,
+                control,
+            )
             parser_started_at = time.time()
             process = await start_parser_process(settings, log)
             output_task = asyncio.create_task(pipe_process_output(process, log))
@@ -226,6 +291,9 @@ async def supervise_parser(
 
             if return_code == ACCESS_CHALLENGE_EXIT_CODE:
                 restart_count = 0
+                if load_site_cooldown(settings.site_cooldown_path) is not None:
+                    log.info("Получен обязательный лимит Profi.ru; включаю таймер паузы")
+                    continue
                 reason = "Profi.ru показал CAPTCHA или страницу ограничения доступа"
                 control.pause(reason)
                 log.error("Парсер поставлен на безопасную паузу: %s", reason)

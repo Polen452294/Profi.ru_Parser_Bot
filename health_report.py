@@ -11,6 +11,7 @@ from config import Settings
 from heartbeat import parse_utc_timestamp, read_heartbeat
 from runtime_control import ParserPauseControl
 from session_recovery import SessionRecoveryManager
+from site_cooldown import format_remaining_time
 from version import APP_VERSION
 
 
@@ -52,7 +53,16 @@ def build_health_report(
     free_mb = disk.free // (1024 * 1024)
     disk_icon = "✅" if free_mb >= settings.min_free_disk_mb else "⚠️"
 
-    if control.paused:
+    hard_pause_remaining = max(
+        control.remaining_seconds,
+        getattr(recovery, "site_cooldown_remaining_seconds", 0),
+    )
+    if hard_pause_remaining:
+        parser_state = (
+            "обязательная пауза Profi.ru — осталось "
+            f"{format_remaining_time(hard_pause_remaining)}"
+        )
+    elif control.paused:
         parser_state = f"пауза — {control.reason}"
     elif recovery.in_progress:
         parser_state = "восстановление сессии"
@@ -62,11 +72,12 @@ def build_health_report(
     rotating_profi_routes = settings.profi_proxy_rotation_enabled
     if rotating_profi_routes:
         primary = "прокси" if settings.profi_proxy else "прямой маршрут"
-        start_mode = (
-            "старт через пул"
-            if settings.profi_proxy_start_from_pool
-            else f"старт: {primary}"
-        )
+        if settings.profi_proxy_random_on_start:
+            start_mode = "случайный прокси при запуске"
+        elif settings.profi_proxy_start_from_pool:
+            start_mode = "старт через пул"
+        else:
+            start_mode = f"старт: {primary}"
         proxy_state = (
             f"Profi.ru: пул из {len(settings.profi_proxy_pool)} маршрутов, {start_mode}; "
             f"Telegram: {'прокси' if settings.telegram_proxy else 'напрямую'}"

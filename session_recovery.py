@@ -15,6 +15,12 @@ from playwright.sync_api import sync_playwright
 
 from audience import TelegramAudience
 from config import Settings
+from site_cooldown import (
+    activate_site_cooldown,
+    clear_site_cooldown,
+    format_remaining_time,
+    load_site_cooldown,
+)
 
 
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
@@ -47,7 +53,7 @@ LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
 OTP_FILL_DELAY_SEC = 1.0
 LOGIN_RETRY_LATER_PATTERN = re.compile(
-    r"повторите\s+через\s+\d+(?:[.,]\d+)?\s*"
+    r"(?:можно\s+будет\s+)?повтор(?:ить|ите)\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
     re.IGNORECASE,
 )
@@ -572,6 +578,7 @@ class SessionRecoveryManager:
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._session_ready = asyncio.Event()
+        self._cancel_event = asyncio.Event()
         self._on_success = on_success
         self.audience = audience or TelegramAudience(settings, log)
         self._last_started_at = 0.0
@@ -581,6 +588,11 @@ class SessionRecoveryManager:
     @property
     def in_progress(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def site_cooldown_remaining_seconds(self) -> int:
+        cooldown = load_site_cooldown(self.settings.site_cooldown_path)
+        return cooldown.remaining_seconds() if cooldown is not None else 0
 
     async def _send(self, text: str) -> int:
         return await self.audience.send(self.bot, text)
@@ -613,7 +625,14 @@ class SessionRecoveryManager:
                 )
                 return False
             if self.in_progress:
-                await self._send("ℹ️ Обновление сессии уже выполняется.")
+                remaining = self.site_cooldown_remaining_seconds
+                if remaining:
+                    await self._send(
+                        "⏸ Действует обязательная пауза Profi.ru. "
+                        f"Осталось: {format_remaining_time(remaining)}."
+                    )
+                else:
+                    await self._send("ℹ️ Обновление сессии уже выполняется.")
                 return False
 
             elapsed = time.monotonic() - self._last_started_at
@@ -627,6 +646,7 @@ class SessionRecoveryManager:
 
             self._clear_code_queue()
             self.awaiting_code = False
+            self._cancel_event.clear()
             self._session_ready.clear()
             self._last_started_at = time.monotonic()
             self._task = asyncio.create_task(self._run(reason))
@@ -655,18 +675,48 @@ class SessionRecoveryManager:
         except Empty as exc:
             raise SessionRecoveryError("Время ожидания SMS-кода истекло") from exc
 
+    async def _wait_for_site_cooldown(self, *, announce: bool = True) -> bool:
+        cooldown = load_site_cooldown(self.settings.site_cooldown_path)
+        if cooldown is None:
+            return True
+
+        remaining = cooldown.remaining_seconds()
+        resume_at = time.strftime(
+            "%d.%m.%Y %H:%M:%S",
+            time.localtime(cooldown.until_timestamp),
+        )
+        if announce:
+            await self._send_required(
+                "⏸ Profi.ru сообщил о слишком большом количестве попыток входа.\n\n"
+                "Новые клики, запросы SMS и обращения парсера к сайту остановлены. "
+                f"Осталось: {format_remaining_time(remaining)}.\n"
+                f"Автоматическое возобновление: {resume_at}.\n\n"
+                "Команды /renew и /resume не снимают это ограничение раньше срока."
+            )
+        remaining = cooldown.remaining_seconds()
+        if remaining <= 0:
+            clear_site_cooldown(self.settings.site_cooldown_path)
+            return True
+        try:
+            await asyncio.wait_for(
+                self._cancel_event.wait(),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            clear_site_cooldown(self.settings.site_cooldown_path)
+            self._clear_code_queue()
+            await self._send(
+                "▶️ 12-часовая пауза завершена. Автоматически повторяю вход в Profi.ru."
+            )
+            return True
+        return False
+
     async def _run(self, reason: str) -> None:
         if not self.audience.has_recipients:
             self.log.warning(
                 "Ожидаю первого пользователя Telegram перед запросом SMS-кода"
             )
             await self.audience.wait_until_available()
-        await self._send_required(
-            "🔐 Сессия Profi.ru требует обновления.\n"
-            f"Причина: {reason}\n\n"
-            "Ввожу номер телефона и нажимаю только кнопку входа "
-            'data-testid="enter_with_sms_btn".'
-        )
         loop = asyncio.get_running_loop()
 
         def announce_from_thread() -> None:
@@ -676,58 +726,90 @@ class SessionRecoveryManager:
             )
             future.result(timeout=30)
 
-        try:
-            await asyncio.to_thread(
-                recreate_profi_session,
-                self.settings,
-                self._wait_for_code,
-                announce_from_thread,
+        cooldown_announced = False
+        while not self._cancel_event.is_set():
+            if not await self._wait_for_site_cooldown(
+                announce=not cooldown_announced,
+            ):
+                return
+            cooldown_announced = False
+            await self._send_required(
+                "🔐 Сессия Profi.ru требует обновления.\n"
+                f"Причина: {reason}\n\n"
+                "Ввожу номер телефона и нажимаю только кнопку входа "
+                'data-testid="enter_with_sms_btn".'
             )
-            self._session_ready.set()
-            if self._on_success is not None:
-                self._on_success()
-            await self._send(
-                "✅ Сессия Profi.ru обновлена. Парсер автоматически возобновляет работу."
-            )
-            self.log.info("Сессия Profi.ru успешно обновлена")
-        except SessionRecoveryError as exc:
-            self.log.error("Не удалось обновить сессию Profi.ru: %s", exc)
-            if exc.screenshot_path is not None and exc.screenshot_path.exists():
-                try:
-                    await self.audience.send_photo(
-                        self.bot,
-                        str(exc.screenshot_path),
-                        "Диагностика неудачного входа в Profi.ru. "
-                        "На изображении видно состояние страницы в момент ошибки.",
-                    )
-                except Exception:
-                    self.log.exception(
-                        "Не удалось отправить диагностический скриншот в Telegram"
-                    )
-            if isinstance(exc, LoginRetryLaterError):
-                await self._send(
-                    "⏳ Profi.ru временно ограничил повторный вход.\n"
-                    f"Сообщение сайта: {exc}\n\n"
-                    "Бот остановил вход и не стал повторно нажимать кнопку или "
-                    "запрашивать SMS. Повторите /renew после указанного сайтом срока."
+            try:
+                await asyncio.to_thread(
+                    recreate_profi_session,
+                    self.settings,
+                    self._wait_for_code,
+                    announce_from_thread,
                 )
-            else:
+                self._session_ready.set()
+                if self._on_success is not None:
+                    self._on_success()
+                await self._send(
+                    "✅ Сессия Profi.ru обновлена. Парсер автоматически возобновляет работу."
+                )
+                self.log.info("Сессия Profi.ru успешно обновлена")
+                return
+            except SessionRecoveryError as exc:
+                self.log.error("Не удалось обновить сессию Profi.ru: %s", exc)
+                if exc.screenshot_path is not None and exc.screenshot_path.exists():
+                    try:
+                        await self.audience.send_photo(
+                            self.bot,
+                            str(exc.screenshot_path),
+                            "Диагностика неудачного входа в Profi.ru. "
+                            "На изображении видно состояние страницы в момент ошибки.",
+                        )
+                    except Exception:
+                        self.log.exception(
+                            "Не удалось отправить диагностический скриншот в Telegram"
+                        )
+                if isinstance(exc, LoginRetryLaterError):
+                    activate_site_cooldown(
+                        self.settings.site_cooldown_path,
+                        str(exc),
+                    )
+                    self.awaiting_code = False
+                    self._clear_code_queue()
+                    reason = "завершилась обязательная 12-часовая пауза"
+                    await self._send(
+                        "⏳ Profi.ru временно ограничил повторный вход на 12 часов.\n"
+                        f"Сообщение сайта: {exc}\n\n"
+                        "Бот не будет нажимать кнопки, запрашивать SMS или обращаться "
+                        "к сайту до окончания срока. После паузы работа продолжится "
+                        "автоматически."
+                    )
+                    cooldown_announced = True
+                    continue
                 await self._send(
                     "❌ Не удалось обновить сессию Profi.ru.\n"
                     f"Причина: {exc}\n\n"
                     "Подробности сохранены в logs/debug/session_recovery_failed.txt и .html. "
                     "Исправьте настройки при необходимости и отправьте /renew для повтора."
                 )
-        except Exception:
-            self.log.exception("Непредвиденная ошибка восстановления сессии")
-            await self._send(
-                "❌ Внутренняя ошибка восстановления сессии. "
-                "Отправьте /renew для повторной попытки."
-            )
-        finally:
-            self.awaiting_code = False
+                return
+            except Exception:
+                self.log.exception("Непредвиденная ошибка восстановления сессии")
+                await self._send(
+                    "❌ Внутренняя ошибка восстановления сессии. "
+                    "Отправьте /renew для повторной попытки."
+                )
+                return
+            finally:
+                self.awaiting_code = False
 
     async def submit_code(self, raw_code: str) -> tuple[bool, str]:
+        remaining = self.site_cooldown_remaining_seconds
+        if remaining:
+            return (
+                False,
+                "Сейчас действует обязательная пауза Profi.ru. Код не принят. "
+                f"Осталось: {format_remaining_time(remaining)}.",
+            )
         if not self.awaiting_code and not self.in_progress:
             return False, "Сейчас бот не ожидает SMS-код. Используйте /renew."
 
@@ -746,9 +828,12 @@ class SessionRecoveryManager:
             return True, "Код получен и сохранён. Введу его, когда поле появится на Profi.ru…"
         return True, "Код получен. Вставляю его в поле подтверждения Profi.ru…"
 
-    async def cancel(self) -> bool:
+    async def cancel(self, *, force: bool = False) -> bool:
         if not self.in_progress:
             return False
+        if self.site_cooldown_remaining_seconds and not force:
+            return False
+        self._cancel_event.set()
         with suppress(Full):
             self._code_queue.put_nowait(CANCEL_RECOVERY)
         self.awaiting_code = False
@@ -758,7 +843,7 @@ class SessionRecoveryManager:
         await self._session_ready.wait()
 
     async def stop(self) -> None:
-        await self.cancel()
+        await self.cancel(force=True)
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10)

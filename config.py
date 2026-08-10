@@ -152,6 +152,7 @@ class Settings:
     system_event_cursor_path: Path
     telegram_chats_path: Path
     heartbeat_path: Path
+    site_cooldown_path: Path
     version_state_path: Path
     instance_lock_path: Path
     backup_dir: Path
@@ -187,6 +188,7 @@ class Settings:
     profi_proxy_pool_path: Path
     profi_proxy_pool: tuple[str | None, ...]
     profi_proxy_start_from_pool: bool
+    profi_proxy_random_on_start: bool
     profi_http_impersonate: str
     profi_browser_profile_path: Path
     profi_browser_stealth: bool
@@ -262,6 +264,7 @@ class Settings:
             system_event_cursor_path=data_dir / "system_event_cursor.json",
             telegram_chats_path=data_dir / "telegram_chats.json",
             heartbeat_path=data_dir / "heartbeat.json",
+            site_cooldown_path=data_dir / "site_cooldown.json",
             version_state_path=data_dir / "version_state.json",
             instance_lock_path=data_dir / "parser.lock",
             backup_dir=backup_dir,
@@ -383,6 +386,11 @@ class Settings:
                 "PROFI_PROXY_START_FROM_POOL",
                 False,
             ),
+            profi_proxy_random_on_start=_parse_bool(
+                values,
+                "PROFI_PROXY_RANDOM_ON_START",
+                False,
+            ),
             profi_http_impersonate=values.get(
                 "PROFI_HTTP_IMPERSONATE",
                 "chrome",
@@ -471,6 +479,19 @@ class Settings:
             return 1
         return 0
 
+    @property
+    def initial_profi_proxy_candidates(self) -> tuple[int, ...]:
+        """Возвращает допустимые стартовые маршруты без раскрытия их адресов."""
+        if self.profi_proxy_random_on_start:
+            proxy_indexes = tuple(
+                index
+                for index, proxy_url in enumerate(self.profi_proxy_pool)
+                if index > 0 and proxy_url is not None
+            )
+            if proxy_indexes:
+                return proxy_indexes
+        return (self.initial_profi_proxy_index,)
+
     @staticmethod
     def playwright_proxy_for(proxy_url: str | None) -> dict[str, str] | None:
         if not proxy_url:
@@ -538,6 +559,7 @@ class Settings:
             DEFAULT_ENV_FILE,
             self.auth_state_path,
             self.profi_proxy_pool_path,
+            self.site_cooldown_path,
         ):
             if private_file.exists():
                 try:

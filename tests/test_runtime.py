@@ -5,12 +5,132 @@ from unittest.mock import patch
 
 from client import ProfiClient, SiteResponseError
 from config import Settings
-from main import _restart_after_ip_limit, failure_backoff_seconds
+from main import (
+    AccessChallengeError,
+    _raise_login_retry_cooldown,
+    _restart_after_ip_limit,
+    _restart_client,
+    _select_initial_proxy_index,
+    failure_backoff_seconds,
+)
 from run_all import read_order_batch
+from site_cooldown import load_site_cooldown
 from tg_formatter import MAX_DESCRIPTION_LENGTH, format_order
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_proxy_restart_rotates_identity_in_the_same_operation(self):
+        class FakePage:
+            url = "https://profi.ru/backoffice/n.php"
+
+            def title(self):
+                return "Заказы"
+
+        class FakeClient:
+            proxy_index = 0
+            page = FakePage()
+
+            def switch_proxy_and_identity(self, proxy_index):
+                self.switched_to = proxy_index
+                self.proxy_index = proxy_index
+
+            def open_board(self):
+                self.board_opened = True
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": directory,
+                    "PROFI_PROXY": "http://primary.local:3128",
+                    "PROFI_PROXY_POOL": "http://backup.local:3128",
+                },
+            )
+            client = FakeClient()
+            result = _restart_client(
+                client,
+                object(),
+                settings,
+                "смена IP",
+                proxy_index=1,
+            )
+
+        self.assertIs(result, client)
+        self.assertEqual(client.switched_to, 1)
+        self.assertTrue(client.board_opened)
+        self.assertFalse(hasattr(client, "closed"))
+
+    def test_random_start_selects_one_proxy_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": directory,
+                    "PROFI_PROXY": "direct",
+                    "PROFI_PROXY_POOL": (
+                        "http://proxy-one.local:1000,"
+                        "http://proxy-two.local:1000"
+                    ),
+                    "PROFI_PROXY_RANDOM_ON_START": "true",
+                },
+            )
+
+            with patch("main.random.choice", return_value=2) as choice:
+                selected = _select_initial_proxy_index(settings)
+
+        self.assertEqual(selected, 2)
+        choice.assert_called_once_with((1, 2))
+
+    def test_twelve_hour_page_stops_parser_and_persists_pause(self):
+        class FakeClient:
+            def save_debug(self, prefix):
+                self.prefix = prefix
+                screenshot = settings.debug_dir / f"{prefix}_test.png"
+                screenshot.parent.mkdir(parents=True, exist_ok=True)
+                screenshot.write_bytes(b"png")
+                return screenshot, screenshot.with_suffix(".html"), None
+
+        class FakeHealth:
+            def access_challenge(self, message, screenshot):
+                self.message = message
+                self.screenshot = screenshot
+
+        class FakeHeartbeat:
+            def mark_paused(self, message):
+                self.message = message
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings.load(
+                env_file=None,
+                values={
+                    "DATA_DIR": str(Path(directory) / "data"),
+                    "LOG_DIR": str(Path(directory) / "logs"),
+                },
+            )
+            client = FakeClient()
+            health = FakeHealth()
+            heartbeat = FakeHeartbeat()
+
+            with self.assertRaises(AccessChallengeError):
+                _raise_login_retry_cooldown(
+                    client,
+                    settings,
+                    health,
+                    heartbeat,
+                    "Можно будет повторить через 12 часов",
+                )
+
+            cooldown = load_site_cooldown(settings.site_cooldown_path)
+
+        self.assertEqual(client.prefix, "login_retry_cooldown")
+        self.assertIsNotNone(cooldown)
+        self.assertGreaterEqual(cooldown.remaining_seconds(), 43_199)
+        self.assertIn("обязательную паузу", health.message)
+        self.assertEqual(heartbeat.message, health.message)
+
     def test_repeat_ip_limit_replaces_identity_before_proxy_restart(self):
         class FakeClient:
             def save_debug(self, prefix):
@@ -132,13 +252,12 @@ class RuntimeTests(unittest.TestCase):
             )
             playwright = FakePlaywright()
 
-            with ProfiClient(playwright, settings):
-                pass
-
+            client = ProfiClient(playwright, settings).start()
+            primary_identity = client._ensure_identity()
             primary_launch_options = playwright.chromium.launch_options
-
-            with ProfiClient(playwright, settings, proxy_index=1):
-                pass
+            backup_identity = client.switch_proxy_and_identity(1)
+            backup_launch_options = playwright.chromium.launch_options
+            client.close()
 
         self.assertTrue(primary_launch_options["headless"])
         self.assertEqual(
@@ -152,11 +271,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(
             any(arg.startswith("--window-size=") for arg in primary_launch_options["args"])
         )
-        backup_launch_options = playwright.chromium.launch_options
         self.assertTrue(backup_launch_options["headless"])
         self.assertEqual(
             backup_launch_options["proxy"],
             {"server": "http://backup.local:3128"},
+        )
+        self.assertEqual(client.proxy_index, 1)
+        self.assertNotEqual(primary_identity.identity_id, backup_identity.identity_id)
+        self.assertNotEqual(primary_identity.canvas_seed, backup_identity.canvas_seed)
+        self.assertNotEqual(primary_identity.audio_seed, backup_identity.audio_seed)
+        self.assertNotEqual(
+            primary_identity.webgl_renderer,
+            backup_identity.webgl_renderer,
         )
 
     def test_failure_backoff_grows_and_is_capped(self):

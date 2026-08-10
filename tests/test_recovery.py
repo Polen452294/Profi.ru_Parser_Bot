@@ -321,7 +321,10 @@ class RecoveryTests(unittest.TestCase):
     def test_login_retry_later_text_is_detected(self):
         class Body:
             def inner_text(self, timeout):
-                return "Слишком много попыток. Повторите через 12 часов"
+                return (
+                    "Слишком много попыток. "
+                    "Можно будет повторить через 12 часов."
+                )
 
         class Page:
             def locator(self, selector):
@@ -335,37 +338,54 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             _find_login_retry_later_text(Page()),
-            "Повторите через 12 часов",
+            "Можно будет повторить через 12 часов",
         )
 
     def test_manager_notifies_user_about_login_retry_limit(self):
         async def scenario():
-            settings = Settings.load(
-                env_file=None,
-                values={
-                    "BOT_TOKEN": "123:abc",
-                    "ADMIN_CHAT_ID": "42",
-                    "PROFI_LOGIN": "+79990000000",
-                },
-            )
-            bot = FakeBot()
-            manager = SessionRecoveryManager(settings, bot, FakeLog())
-
-            async def fail_recovery(*args, **kwargs):
-                raise LoginRetryLaterError(
-                    "Profi.ru ограничил повторный вход: «Повторите через 12 часов»"
+            with tempfile.TemporaryDirectory() as directory:
+                settings = Settings.load(
+                    env_file=None,
+                    values={
+                        "DATA_DIR": str(Path(directory) / "data"),
+                        "BOT_TOKEN": "123:abc",
+                        "ADMIN_CHAT_ID": "42",
+                        "PROFI_LOGIN": "+79990000000",
+                    },
                 )
+                bot = FakeBot()
+                manager = SessionRecoveryManager(settings, bot, FakeLog())
+                recovery_calls = 0
 
-            with patch(
-                "session_recovery.asyncio.to_thread",
-                new=fail_recovery,
-            ):
-                await manager._run("test")
+                async def fail_once_then_succeed(*args, **kwargs):
+                    nonlocal recovery_calls
+                    recovery_calls += 1
+                    if recovery_calls == 1:
+                        raise LoginRetryLaterError(
+                            "Profi.ru ограничил повторный вход: «Повторите через 12 часов»"
+                        )
 
-            notification = bot.messages[-1][1]
+                async def skip_persisted_wait_for_test(**kwargs):
+                    settings.site_cooldown_path.unlink(missing_ok=True)
+                    return True
+
+                with patch(
+                    "session_recovery.asyncio.to_thread",
+                    new=fail_once_then_succeed,
+                ), patch.object(
+                    manager,
+                    "_wait_for_site_cooldown",
+                    new=skip_persisted_wait_for_test,
+                ):
+                    await manager._run("test")
+
+            notification = next(
+                text for _, text in bot.messages if "ограничил повторный вход" in text
+            )
             self.assertIn("⏳", notification)
             self.assertIn("Повторите через 12 часов", notification)
-            self.assertIn("не стал повторно нажимать", notification)
+            self.assertIn("После паузы работа продолжится автоматически", notification)
+            self.assertEqual(recovery_calls, 2)
 
         asyncio.run(scenario())
 
