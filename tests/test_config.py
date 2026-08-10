@@ -14,6 +14,14 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_dir, PROJECT_DIR / "logs")
         self.assertEqual(settings.orders_path, PROJECT_DIR / "data" / "new_orders.jsonl")
         self.assertTrue(settings.headless)
+        self.assertEqual(
+            settings.profi_browser_profile_path,
+            PROJECT_DIR / "data" / "chromium-profile",
+        )
+        self.assertEqual(settings.profi_http_impersonate, "chrome")
+        self.assertTrue(settings.profi_http_cookie_bridge)
+        self.assertTrue(settings.profi_browser_stealth)
+        self.assertTrue(settings.profi_identity_rotate_on_repeat_block)
 
     def test_default_sms_code_selector_uses_exact_pin_test_id(self):
         settings = Settings.load(env_file=None, values={})

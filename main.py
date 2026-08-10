@@ -121,8 +121,11 @@ def _restart_after_ip_limit(
     reason: str,
     *,
     proxy_index: int,
+    reset_identity: bool,
 ) -> ProfiClient:
     client.save_debug("ip_rotation_limit")
+    if reset_identity:
+        client.replace_blocked_identity(reason)
     logger.warning(
         "%s. Переключаю маршрут Profi.ru на %s/%s",
         reason,
@@ -264,6 +267,7 @@ def run_parser(settings: Settings) -> None:
                                 heartbeat,
                                 ip_limit,
                                 proxy_index=proxy_index,
+                                reset_identity=rotations_since_success > 1,
                             )
                             continue
                         _raise_access_challenge(
@@ -295,6 +299,7 @@ def run_parser(settings: Settings) -> None:
                                     heartbeat,
                                     ip_limit,
                                     proxy_index=proxy_index,
+                                    reset_identity=rotations_since_success > 1,
                                 )
                                 continue
                             _raise_access_challenge(

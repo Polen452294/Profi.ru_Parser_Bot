@@ -187,6 +187,14 @@ class Settings:
     profi_proxy_pool_path: Path
     profi_proxy_pool: tuple[str | None, ...]
     profi_proxy_start_from_pool: bool
+    profi_http_impersonate: str
+    profi_browser_profile_path: Path
+    profi_browser_stealth: bool
+    profi_identity_rotate_on_repeat_block: bool
+    profi_browser_locale: str
+    profi_browser_timezone: str
+    profi_user_agent: str
+    profi_http_cookie_bridge: bool
     bot_poll_sec: int
     restart_delay_sec: int
     max_restarts: int
@@ -218,6 +226,13 @@ class Settings:
         profi_proxy_pool_path = _resolve_path(
             project_dir,
             raw_proxy_pool_path or str(data_dir / "profi_proxies.txt"),
+        )
+        profi_browser_profile_path = _resolve_path(
+            project_dir,
+            values.get(
+                "PROFI_BROWSER_PROFILE_PATH",
+                str(data_dir / "chromium-profile"),
+            ),
         )
 
         proxy = _parse_proxy_url(values, "TELEGRAM_PROXY")
@@ -368,6 +383,45 @@ class Settings:
                 "PROFI_PROXY_START_FROM_POOL",
                 False,
             ),
+            profi_http_impersonate=values.get(
+                "PROFI_HTTP_IMPERSONATE",
+                "chrome",
+            ).strip()
+            or "chrome",
+            profi_browser_profile_path=profi_browser_profile_path,
+            profi_browser_stealth=_parse_bool(
+                values,
+                "PROFI_BROWSER_STEALTH",
+                True,
+            ),
+            profi_identity_rotate_on_repeat_block=_parse_bool(
+                values,
+                "PROFI_IDENTITY_ROTATE_ON_REPEAT_BLOCK",
+                True,
+            ),
+            profi_browser_locale=values.get(
+                "PROFI_BROWSER_LOCALE",
+                "ru-RU",
+            ).strip()
+            or "ru-RU",
+            profi_browser_timezone=values.get(
+                "PROFI_BROWSER_TIMEZONE",
+                "Europe/Moscow",
+            ).strip()
+            or "Europe/Moscow",
+            profi_user_agent=values.get(
+                "PROFI_USER_AGENT",
+                (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/136.0.0.0 Safari/537.36"
+                ),
+            ).strip(),
+            profi_http_cookie_bridge=_parse_bool(
+                values,
+                "PROFI_HTTP_COOKIE_BRIDGE",
+                True,
+            ),
             bot_poll_sec=_parse_int(values, "BOT_POLL_SEC", 3, minimum=1),
             restart_delay_sec=_parse_int(values, "RESTART_DELAY_SEC", 10, minimum=1),
             max_restarts=_parse_int(values, "MAX_RESTARTS", 50, minimum=1),
@@ -468,11 +522,13 @@ class Settings:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.debug_dir.mkdir(parents=True, exist_ok=True)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self.profi_browser_profile_path.mkdir(parents=True, exist_ok=True)
         for directory in (
             self.data_dir,
             self.log_dir,
             self.debug_dir,
             self.backup_dir,
+            self.profi_browser_profile_path,
         ):
             try:
                 directory.chmod(0o700)
@@ -496,6 +552,14 @@ class Settings:
             errors.append("PROFI_PAGE_URL не может быть пустым")
         if not self.card_selector:
             errors.append("PROFI_CARD_SELECTOR не может быть пустым")
+        if not self.profi_user_agent:
+            errors.append("PROFI_USER_AGENT не может быть пустым")
+        if not self.profi_http_impersonate:
+            errors.append("PROFI_HTTP_IMPERSONATE не может быть пустым")
+        if not self.profi_browser_locale:
+            errors.append("PROFI_BROWSER_LOCALE не может быть пустым")
+        if not self.profi_browser_timezone:
+            errors.append("PROFI_BROWSER_TIMEZONE не может быть пустым")
 
         if require_telegram:
             if not self.bot_token or self.bot_token.lower() in {

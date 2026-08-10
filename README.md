@@ -245,8 +245,9 @@ Enter для SMS-кода не используются.
 Telegram начинает принимать SMS-код сразу после перехода на этап подтверждения.
 До ответа пользователя бот вообще не ищет поле кода и не взаимодействует с ним.
 Получив ровно четыре цифры, бот выдерживает отдельную паузу 1 секунду, впервые
-ищет видимое поле `data-testid="auth_pin_input"` и вставляет в него код одним
-действием. Форма на этом этапе автоматически не перезагружается.
+ищет видимое поле `data-testid="auth_pin_input"`, после его обнаружения ждёт ещё
+1 секунду и только затем вставляет код одним действием. Форма на этом этапе
+автоматически не перезагружается.
 Поиск выполняется во всех открытых вкладках и iframe, а CSS-локаторы Playwright
 также проходят через открытые shadow DOM. Если `data-testid="auth_pin_input"`
 установлен на оболочке компонента, бот использует вложенный редактируемый `input`.
@@ -265,6 +266,22 @@ Telegram начинает принимать SMS-код сразу после п
 12-часового ограничения. Чтобы сразу начать работу через первый адрес из файла,
 укажите `PROFI_PROXY_START_FROM_POOL=true`. Если пул пуст или отсутствует,
 настройка безопасно игнорируется и используется `PROFI_PROXY`.
+
+Chromium и стартовый HTTP-сеанс используют одну сохраняемую browser identity:
+User-Agent, Client Hints, locale, timezone и viewport. Identity хранится в
+`data/chromium-profile/profi-browser-identity.json`; в лог попадают только её
+короткий ID, viewport, точный профиль `curl_cffi` и количество cookies — без их
+значений. Перед первым открытием страницы cookies Chromium переносятся в
+`curl_cffi`, а полученные `Set-Cookie` возвращаются в Chromium. Значение
+`PROFI_HTTP_IMPERSONATE=chrome` автоматически выбирает профиль, совпадающий с
+версией из `PROFI_USER_AGENT` (`chrome136` для настройки по умолчанию).
+
+Stealth-настройки согласуют `navigator.webdriver`, `platform`, `languages` и
+`userAgentData`. Если после первой смены IP сайт снова показывает 12-часовой
+лимит, перед следующей сменой очищаются cookies, Local/Session Storage, Cache
+Storage и IndexedDB, затем создаётся новая identity. Очистка cookies может
+потребовать автоматического повторного входа через настроенное восстановление
+сессии.
 
 Если на странице появляется точная надпись «Можно будет повторить через 12
 часов», парсер сохраняет диагностику, закрывает Chromium и запускает его со
@@ -294,9 +311,10 @@ CAPTCHA автоматически не решается. Если ограни�
 
 ## Защита от лишней нагрузки и блокировок
 
-Парсер не подменяет отпечаток браузера, не скрывает Playwright и не решает
-CAPTCHA. Ротацию IP используйте только для маршрутов и аккаунта, для которых у
-вас есть разрешение; автоматическая ротация не отменяет правила Profi.ru.
+Парсер согласует техническую browser identity, но не решает CAPTCHA и не
+гарантирует отсутствие блокировок. Ротацию IP используйте только для маршрутов
+и аккаунта, для которых у вас есть разрешение; автоматическая ротация не
+отменяет правила Profi.ru.
 
 Для снижения нагрузки реализованы безопасные меры:
 
@@ -382,6 +400,14 @@ backups/
 | `PROFI_PROXY_START_FROM_POOL` | `false` | начинать работу сразу через первый адрес из пула |
 | `PROFI_PROXY_POOL` | пусто | резервные HTTP/SOCKS-маршруты через запятую для 12-часового IP-лимита |
 | `PROFI_PAGE_URL` | `https://profi.ru/backoffice/` | страница заказов |
+| `PROFI_HTTP_IMPERSONATE` | `chrome` | TLS/HTTP-профиль `curl_cffi`; `chrome` выбирает точную версию по User-Agent |
+| `PROFI_HTTP_COOKIE_BRIDGE` | `true` | синхронизировать cookies Chromium и стартового HTTP-сеанса |
+| `PROFI_BROWSER_PROFILE_PATH` | `data/chromium-profile` | каталог сохраняемой browser identity |
+| `PROFI_BROWSER_STEALTH` | `true` | согласовать browser identity в JavaScript окружении |
+| `PROFI_IDENTITY_ROTATE_ON_REPEAT_BLOCK` | `true` | менять identity и очищать site data перед повторной сменой IP |
+| `PROFI_BROWSER_LOCALE` | `ru-RU` | locale Chromium и HTTP-заголовков |
+| `PROFI_BROWSER_TIMEZONE` | `Europe/Moscow` | timezone Chromium |
+| `PROFI_USER_AGENT` | Chrome 136 | общий User-Agent Chromium и `curl_cffi` |
 | `HEADLESS` | `true` | запускать основной Chromium без окна |
 | `POLL_BASE_SEC` | `90` | минимальная пауза между проверками |
 | `POLL_JITTER_SEC` | `60` | случайная добавка к паузе |

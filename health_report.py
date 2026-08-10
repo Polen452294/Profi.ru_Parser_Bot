@@ -91,5 +91,6 @@ def build_health_report(
         f"Успешная проверка Profi.ru: {_age_text(success_at)}\n"
         f"{disk_icon} Свободно на диске: {free_mb} МБ\n\n"
         f"Playwright: {_package_version('playwright')}\n"
+        f"curl_cffi: {_package_version('curl-cffi')}\n"
         f"aiogram: {_package_version('aiogram')}"
     )

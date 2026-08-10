@@ -295,7 +295,7 @@ class RecoveryTests(unittest.TestCase):
                     announce,
                 )
 
-            self.assertEqual(sleep_mock.call_args_list.count(call(1.0)), 2)
+            self.assertEqual(sleep_mock.call_args_list.count(call(1.0)), 3)
 
         self.assertLess(
             events.index(("fill", "+79990000000")),

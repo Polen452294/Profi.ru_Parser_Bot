@@ -129,6 +129,23 @@ class FakeProfiIntegrationTests(unittest.TestCase):
                     client.open_board()
                     self.assertTrue(client.wait_cards())
                     self.assertIsNone(client.detect_access_challenge())
+                    navigator_identity = client.page.evaluate(
+                        """() => ({
+                            webdriver: navigator.webdriver,
+                            platform: navigator.platform,
+                            languages: navigator.languages,
+                            userAgent: navigator.userAgent,
+                            clientHintPlatform: navigator.userAgentData?.platform
+                        })"""
+                    )
+                    self.assertIsNone(navigator_identity.get("webdriver"))
+                    self.assertEqual(navigator_identity["platform"], "Win32")
+                    self.assertEqual(navigator_identity["languages"][0], "ru-RU")
+                    self.assertIn("Chrome/136.", navigator_identity["userAgent"])
+                    self.assertEqual(
+                        navigator_identity["clientHintPlatform"],
+                        "Windows",
+                    )
 
                     client.page.goto(f"{self.base_url}/captcha")
                     reason = client.detect_access_challenge()

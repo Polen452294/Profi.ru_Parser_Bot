@@ -45,6 +45,7 @@ SMS_LOGIN_BUTTON_STABLE_POLLS = 3
 LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
 LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
+OTP_FILL_DELAY_SEC = 1.0
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"повторите\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
@@ -476,6 +477,9 @@ def recreate_profi_session(
                 raise SessionRecoveryError(
                     "После получения кода поле auth_pin_input не найдено или недоступно для ввода"
                 )
+
+            phase = "пауза перед вставкой SMS-кода"
+            time.sleep(OTP_FILL_DELAY_SEC)
 
             phase = "ввод SMS-кода"
             _fill_sms_code(
