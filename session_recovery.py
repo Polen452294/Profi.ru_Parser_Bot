@@ -20,6 +20,22 @@ from config import Settings
 CANCEL_RECOVERY = "__CANCEL_SESSION_RECOVERY__"
 SMS_CODE_PATTERN = re.compile(r"^\d{4}$")
 PIN_INPUT_SELECTOR = '[data-testid="auth_pin_input"]'
+PIN_EDITABLE_SELECTOR = (
+    'input[data-testid="auth_pin_input"], '
+    'textarea[data-testid="auth_pin_input"], '
+    '[contenteditable="true"][data-testid="auth_pin_input"]'
+)
+PIN_DESCENDANT_SELECTOR = (
+    '[data-testid="auth_pin_input"] input, '
+    '[data-testid="auth_pin_input"] textarea, '
+    '[data-testid="auth_pin_input"] [contenteditable="true"]'
+)
+OTP_SEMANTIC_SELECTOR = (
+    'input[autocomplete="one-time-code"], '
+    'input[name*="pin" i], '
+    'input[id*="pin" i], '
+    'input[inputmode="numeric"][maxlength="4"]'
+)
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
 SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
     r"войти\s+по\s+сим[\s‑–—-]*пушу\s+или\s+(?:смс|sms)",
@@ -120,33 +136,78 @@ def _save_recovery_debug(
     return screenshot_path
 
 
-def _visible_sms_inputs(root, selector: str) -> list:
-    selectors = [PIN_INPUT_SELECTOR]
-    if selector != PIN_INPUT_SELECTOR:
+def _usable_sms_inputs(root, selector: str) -> list:
+    selectors = [
+        PIN_EDITABLE_SELECTOR,
+        PIN_DESCENDANT_SELECTOR,
+        PIN_INPUT_SELECTOR,
+    ]
+    if selector not in selectors:
         selectors.append(selector)
+    if OTP_SEMANTIC_SELECTOR not in selectors:
+        selectors.append(OTP_SEMANTIC_SELECTOR)
 
     for candidate_selector in selectors:
         inputs = root.locator(candidate_selector)
-        visible = [
-            inputs.nth(index)
-            for index in range(inputs.count())
-            if inputs.nth(index).is_visible()
-        ]
-        if visible:
-            return visible
+        usable = []
+        for index in range(inputs.count()):
+            candidate = inputs.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+                if (
+                    hasattr(candidate, "is_enabled")
+                    and not candidate.is_enabled()
+                ):
+                    continue
+                if (
+                    hasattr(candidate, "is_editable")
+                    and not candidate.is_editable()
+                ):
+                    continue
+            except PlaywrightError:
+                continue
+            usable.append(candidate)
+        if usable:
+            return usable
     return []
 
 
+def _candidate_pages(page) -> list:
+    pages = [page]
+    try:
+        pages.extend(page.context.pages)
+    except (AttributeError, PlaywrightError):
+        pass
+
+    unique_pages = []
+    seen_ids: set[int] = set()
+    for candidate in pages:
+        candidate_id = id(candidate)
+        if candidate_id in seen_ids:
+            continue
+        seen_ids.add(candidate_id)
+        try:
+            if hasattr(candidate, "is_closed") and candidate.is_closed():
+                continue
+        except PlaywrightError:
+            continue
+        unique_pages.append(candidate)
+    return unique_pages
+
+
 def _find_sms_code_root(page, selector: str):
-    roots = [page]
-    roots.extend(
-        frame
-        for frame in getattr(page, "frames", [])
-        if frame is not getattr(page, "main_frame", None)
-    )
+    roots = []
+    for candidate_page in _candidate_pages(page):
+        roots.append(candidate_page)
+        roots.extend(
+            frame
+            for frame in getattr(candidate_page, "frames", [])
+            if frame is not getattr(candidate_page, "main_frame", None)
+        )
     for root in roots:
         try:
-            if _visible_sms_inputs(root, selector):
+            if _usable_sms_inputs(root, selector):
                 return root
         except PlaywrightError:
             continue
@@ -281,12 +342,27 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
     if not SMS_CODE_PATTERN.fullmatch(code):
         raise SessionRecoveryError("SMS-код должен содержать ровно 4 цифры")
 
-    visible_inputs = _visible_sms_inputs(root, selector)
+    visible_inputs = _usable_sms_inputs(root, selector)
 
     if not visible_inputs:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
-    visible_inputs[0].fill(code)
+    input_locator = visible_inputs[0]
+    input_locator.fill(code)
+
+    try:
+        try:
+            actual_value = input_locator.input_value(timeout=500)
+        except TypeError:
+            actual_value = input_locator.input_value()
+    except (AttributeError, PlaywrightError):
+        # Поле могло исчезнуть сразу после корректного кода из-за автоотправки формы.
+        return
+
+    if re.sub(r"\D", "", actual_value) != code:
+        raise SessionRecoveryError(
+            "Поле auth_pin_input найдено, но не приняло переданный SMS-код"
+        )
 
 
 def recreate_profi_session(
@@ -416,6 +492,20 @@ def recreate_profi_session(
             normalized_code = normalize_sms_code(code)
             if normalized_code is None:
                 raise SessionRecoveryError("Получен некорректный SMS-код")
+
+            # За время ответа в Telegram React может заменить поле или весь iframe.
+            # Поэтому не используем найденный ранее root, а заново ищем актуальное
+            # редактируемое поле во всех вкладках и фреймах непосредственно перед fill().
+            phase = "повторный поиск актуального поля SMS-кода"
+            otp_root = _wait_for_sms_code_root(
+                page,
+                settings.profi_otp_selector,
+                min(settings.page_timeout_ms, 10_000),
+            )
+            if otp_root is None:
+                raise SessionRecoveryError(
+                    "После получения кода поле auth_pin_input исчезло или недоступно для ввода"
+                )
 
             phase = "ввод SMS-кода"
             _fill_sms_code(

@@ -11,6 +11,7 @@ from session_recovery import (
     SessionRecoveryManager,
     _fill_login_input,
     _fill_sms_code,
+    _find_sms_code_root,
     _find_login_retry_later_text,
     normalize_sms_code,
     recreate_profi_session,
@@ -48,6 +49,9 @@ class FakeInput:
     def fill(self, value):
         self.value = value
 
+    def input_value(self, timeout=None):
+        return self.value
+
     def click(self):
         self.clicks += 1
 
@@ -66,6 +70,11 @@ class FakeInputs:
 
     def nth(self, index):
         return self.items[index]
+
+
+class FakeInputsWithItems(FakeInputs):
+    def __init__(self, items):
+        self.items = items
 
 
 class FakePage:
@@ -210,10 +219,7 @@ class RecoveryTests(unittest.TestCase):
             def locator(self, selector):
                 if selector == '[data-testid="enter_with_sms_btn"]':
                     return Inputs(Element(self, "sms_method"))
-                if selector in {
-                    '[data-testid="auth_pin_input"]',
-                    "otp-selector",
-                }:
+                if "auth_pin_input" in selector or selector == "otp-selector":
                     events.append("otp_lookup")
                 return Inputs(Element(self, "otp"))
 
@@ -467,10 +473,82 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(page.inputs.items[0].value, "1234")
         self.assertEqual(page.inputs.items[0].pressed, [])
         self.assertEqual(page.inputs.items[0].clicks, 0)
-        self.assertEqual(
-            page.seen_selectors[0],
-            '[data-testid="auth_pin_input"]',
-        )
+        self.assertIn("auth_pin_input", page.seen_selectors[0])
+
+    def test_sms_fill_reports_when_field_rejects_value(self):
+        class RejectingInput(FakeInput):
+            def fill(self, value):
+                return None
+
+        page = FakePage(input_count=1)
+        page.inputs.items[0] = RejectingInput()
+
+        with self.assertRaisesRegex(Exception, "не приняло"):
+            _fill_sms_code(page, "unused", "1234")
+
+    def test_sms_input_can_be_nested_inside_exact_test_id_wrapper(self):
+        target = FakeInput()
+
+        class Wrapper(FakeInput):
+            def is_editable(self):
+                return False
+
+        class EmptyInputs:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                raise IndexError(index)
+
+        class Root:
+            def locator(self, selector):
+                if selector.startswith('input[data-testid="auth_pin_input"]'):
+                    return EmptyInputs()
+                if '[data-testid="auth_pin_input"] input' in selector:
+                    return FakeInputsWithItems([target])
+                if selector == '[data-testid="auth_pin_input"]':
+                    return FakeInputsWithItems([Wrapper()])
+                return EmptyInputs()
+
+        _fill_sms_code(Root(), "unused", "1234")
+
+        self.assertEqual(target.value, "1234")
+
+    def test_sms_field_is_found_in_new_browser_tab(self):
+        target = FakeInput()
+
+        class EmptyInputs:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                raise IndexError(index)
+
+        class Page:
+            frames = []
+            main_frame = None
+
+            def __init__(self, has_pin=False):
+                self.has_pin = has_pin
+
+            def locator(self, selector):
+                if self.has_pin and "auth_pin_input" in selector:
+                    return FakeInputsWithItems([target])
+                return EmptyInputs()
+
+            def is_closed(self):
+                return False
+
+        primary = Page()
+        popup = Page(has_pin=True)
+
+        class Context:
+            pages = [primary, popup]
+
+        primary.context = Context()
+        popup.context = primary.context
+
+        self.assertIs(_find_sms_code_root(primary, "unused"), popup)
 
     def test_sms_input_rejects_code_that_is_not_exactly_four_digits(self):
         page = FakePage(input_count=1)
