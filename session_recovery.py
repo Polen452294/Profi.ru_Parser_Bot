@@ -703,13 +703,10 @@ class SessionRecoveryManager:
             return True
 
     async def _announce_sms_request(self) -> None:
-        if not self._code_queue.empty():
-            await self._send(
-                "📲 Profi.ru открыл этап подтверждения. Отправленный ранее "
-                "4-значный код уже получен и будет введён после появления поля."
-            )
-            return
-        self.awaiting_code = True
+        # Код действителен только для текущего SMS-запроса. Ничего из прошлой
+        # попытки или присланного до открытия новой формы не переносим.
+        self._clear_code_queue()
+        self.awaiting_code = False
         await self._send(
             "📲 Profi.ru открыл этап подтверждения. Как только код придёт, "
             "отправьте боту ровно 4 цифры "
@@ -718,6 +715,10 @@ class SessionRecoveryManager:
             "Если пришло несколько сообщений, отправьте самый последний код.\n\n"
             "Для отмены используйте /cancel."
         )
+        # Начинаем принимать цифры только после отправки нового приглашения.
+        # Повторная очистка закрывает гонку с кодом из предыдущей попытки.
+        self._clear_code_queue()
+        self.awaiting_code = True
 
     def _wait_for_code(self) -> str:
         try:
@@ -860,7 +861,13 @@ class SessionRecoveryManager:
                 "Сейчас действует обязательная пауза Profi.ru. Код не принят. "
                 f"Осталось: {format_remaining_time(remaining)}.",
             )
-        if not self.awaiting_code and not self.in_progress:
+        if not self.awaiting_code:
+            if self.in_progress:
+                return (
+                    False,
+                    "Код не принят: он отправлен до запроса для текущей формы. "
+                    "Дождитесь нового сообщения бота с просьбой прислать код.",
+                )
             return False, "Сейчас бот не ожидает SMS-код. Используйте /renew."
 
         code = normalize_sms_code(raw_code)
@@ -872,10 +879,7 @@ class SessionRecoveryManager:
         except Full:
             return False, "Код уже получен и обрабатывается."
 
-        received_early = not self.awaiting_code
         self.awaiting_code = False
-        if received_early:
-            return True, "Код получен и сохранён. Введу его, когда поле появится на Profi.ru…"
         return True, "Код получен. Вставляю его в поле подтверждения Profi.ru…"
 
     async def cancel(self, *, force: bool = False) -> bool:

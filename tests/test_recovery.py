@@ -445,7 +445,7 @@ class RecoveryTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_early_code_is_buffered_until_sms_field_appears(self):
+    def test_early_code_is_rejected_and_not_carried_into_new_form(self):
         async def scenario():
             settings = Settings.load(
                 env_file=None,
@@ -461,14 +461,19 @@ class RecoveryTests(unittest.TestCase):
             try:
                 accepted, message = await manager.submit_code("8796")
 
-                self.assertTrue(accepted)
+                self.assertFalse(accepted)
                 self.assertFalse(manager.awaiting_code)
-                self.assertIn("поле появится", message)
+                self.assertIn("до запроса", message)
+                self.assertTrue(manager._code_queue.empty())
+
+                # Даже если старое значение каким-либо образом осталось в
+                # очереди, открытие новой формы обязано его удалить.
+                manager._code_queue.put_nowait("1111")
                 await manager._announce_sms_request()
-                self.assertFalse(manager.awaiting_code)
+                self.assertTrue(manager.awaiting_code)
                 self.assertEqual(len(bot.messages), 1)
-                self.assertIn("уже получен", bot.messages[0][1])
-                self.assertEqual(manager._code_queue.get_nowait(), "8796")
+                self.assertIn("отправьте боту ровно 4 цифры", bot.messages[0][1])
+                self.assertTrue(manager._code_queue.empty())
             finally:
                 manager._task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
