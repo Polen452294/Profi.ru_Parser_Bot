@@ -126,26 +126,6 @@ def _raise_access_challenge(
     raise AccessChallengeError(reason)
 
 
-def _raise_login_retry_cooldown(
-    client: ProfiClient,
-    settings: Settings,
-    health: SiteHealthReporter,
-    heartbeat: HeartbeatReporter,
-    reason: str,
-) -> None:
-    """Stops all Profi.ru requests for the full limit shown by the site."""
-    screenshot_path, _, _ = client.save_debug("login_retry_cooldown")
-    screenshot = str(screenshot_path) if screenshot_path.exists() else None
-    cooldown = activate_site_cooldown(settings.site_cooldown_path, reason)
-    message = (
-        f"{reason}. Парсер поставлен на обязательную паузу до "
-        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cooldown.until_timestamp))}"
-    )
-    health.access_challenge(message, screenshot)
-    heartbeat.mark_paused(message)
-    raise AccessChallengeError(message)
-
-
 def _restart_after_ip_limit(
     client: ProfiClient,
     playwright,
@@ -284,14 +264,6 @@ def run_parser(settings: Settings) -> None:
                     client.soft_refresh()
 
                     ip_limit = client.detect_ip_rotation_limit()
-                    if ip_limit:
-                        _raise_login_retry_cooldown(
-                            client,
-                            settings,
-                            health,
-                            heartbeat,
-                            ip_limit,
-                        )
 
                     challenge = client.detect_access_challenge()
                     if challenge:
@@ -299,14 +271,6 @@ def run_parser(settings: Settings) -> None:
 
                     if not client.wait_cards():
                         ip_limit = client.detect_ip_rotation_limit()
-                        if ip_limit:
-                            _raise_login_retry_cooldown(
-                                client,
-                                settings,
-                                health,
-                                heartbeat,
-                                ip_limit,
-                            )
                         challenge = client.detect_access_challenge()
                         if challenge:
                             _raise_access_challenge(

@@ -9,7 +9,7 @@ import time
 from storage import read_json_object, write_json_atomic
 
 
-SITE_COOLDOWN_SECONDS = 12 * 60 * 60
+SITE_COOLDOWN_SECONDS = 1
 
 
 @dataclass(frozen=True, slots=True)
