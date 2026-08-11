@@ -538,6 +538,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(page.inputs.items[0].clicks, 1)
         self.assertIn("auth_pin_input", page.seen_selectors[0])
 
+    def test_sms_code_is_entered_into_four_separate_inputs(self):
+        page = FakePage(input_count=4)
+
+        _fill_sms_code(page, "unused", "1234")
+
+        self.assertEqual(
+            [item.value for item in page.inputs.items],
+            ["1", "2", "3", "4"],
+        )
+        self.assertEqual(
+            [item.pressed[-1] for item in page.inputs.items],
+            [
+                ("sequential", "1", 80),
+                ("sequential", "2", 80),
+                ("sequential", "3", 80),
+                ("sequential", "4", 80),
+            ],
+        )
+
     def test_old_value_is_cleared_before_sms_code_is_requested(self):
         page = FakePage(input_count=1)
         page.inputs.items[0].value = "+79990000000"
@@ -554,7 +573,7 @@ class RecoveryTests(unittest.TestCase):
         page = FakePage(input_count=1)
         page.inputs.items[0] = RejectingInput()
 
-        with self.assertRaisesRegex(Exception, "не приняло"):
+        with self.assertRaisesRegex(Exception, "не принял"):
             _fill_sms_code(page, "unused", "1234")
 
     def test_sms_input_can_be_nested_inside_exact_test_id_wrapper(self):

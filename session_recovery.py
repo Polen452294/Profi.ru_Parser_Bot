@@ -53,7 +53,12 @@ OTP_SEMANTIC_SELECTOR = (
     'input[autocomplete="one-time-code"], '
     'input[name*="pin" i], '
     'input[id*="pin" i], '
-    'input[inputmode="numeric"][maxlength="4"]'
+    'input[name*="otp" i], '
+    'input[id*="otp" i], '
+    'input[inputmode="numeric"][maxlength="4"], '
+    'input[inputmode="numeric"][maxlength="1"], '
+    'input[type="tel"][maxlength="1"], '
+    'input[type="text"][maxlength="1"]'
 )
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
 SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
@@ -368,24 +373,33 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
     if not visible_inputs:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
-    input_locator = visible_inputs[0]
-    input_locator.click()
-    input_locator.press("ControlOrMeta+A")
-    input_locator.press("Backspace")
-    input_locator.press_sequentially(code, delay=OTP_KEY_DELAY_MS)
+    for input_locator in visible_inputs:
+        input_locator.click()
+        input_locator.press("ControlOrMeta+A")
+        input_locator.press("Backspace")
+
+    if len(visible_inputs) >= len(code):
+        for input_locator, digit in zip(visible_inputs, code, strict=False):
+            input_locator.click()
+            input_locator.press_sequentially(digit, delay=OTP_KEY_DELAY_MS)
+    else:
+        visible_inputs[0].press_sequentially(code, delay=OTP_KEY_DELAY_MS)
 
     try:
-        try:
-            actual_value = input_locator.input_value(timeout=500)
-        except TypeError:
-            actual_value = input_locator.input_value()
+        actual_parts = []
+        for input_locator in visible_inputs:
+            try:
+                actual_parts.append(input_locator.input_value(timeout=500))
+            except TypeError:
+                actual_parts.append(input_locator.input_value())
     except (AttributeError, PlaywrightError):
         # Поле могло исчезнуть сразу после корректного кода из-за автоотправки формы.
         return
 
+    actual_value = "".join(actual_parts)
     if re.sub(r"\D", "", actual_value) != code:
         raise SessionRecoveryError(
-            "Поле auth_pin_input найдено, но не приняло переданный SMS-код"
+            "Поля SMS-кода найдены, но не приняли переданные четыре цифры"
         )
 
 
