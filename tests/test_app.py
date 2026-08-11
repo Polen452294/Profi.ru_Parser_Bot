@@ -13,6 +13,7 @@ from app import (
     command_filter,
     command_parser,
     command_run,
+    command_session_audit,
 )
 from config import Settings
 
@@ -63,10 +64,47 @@ class AppTests(unittest.TestCase):
     def test_cli_exposes_all_user_commands(self):
         parser = build_parser()
 
-        for command in ("doctor", "run", "parser", "auth", "filter"):
+        for command in (
+            "doctor",
+            "run",
+            "parser",
+            "auth",
+            "filter",
+            "session-audit",
+        ):
             with self.subTest(command=command):
                 arguments = parser.parse_args([command])
                 self.assertEqual(arguments.command, command)
+
+    def test_session_audit_command_reports_each_layer(self):
+        storage = SimpleNamespace(
+            cookies=True,
+            local_storage=True,
+            session_storage=True,
+            indexed_db=True,
+            cache_storage=True,
+            service_workers=True,
+            permissions=True,
+        )
+        result = SimpleNamespace(
+            storage=storage,
+            environment_diff={},
+            active_sessions_after_audit=0,
+            close_errors={},
+            passed=True,
+        )
+        output = StringIO()
+
+        with (
+            patch("app._runtime_preflight", return_value=True),
+            patch("session_audit.run_local_session_audit", return_value=result),
+            redirect_stdout(output),
+        ):
+            exit_code = command_session_audit(SimpleNamespace())
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Service Workers", output.getvalue())
+        self.assertIn("работает корректно", output.getvalue())
 
     def test_filter_command_explains_positive_match(self):
         output = StringIO()

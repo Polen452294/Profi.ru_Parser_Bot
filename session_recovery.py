@@ -13,6 +13,19 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from browser_identity import (
+    load_browser_identity,
+    resolve_http_impersonate,
+    stealth_init_script,
+)
+from browser_sessions import (
+    DEFAULT_PROFILE_NAME,
+    BrowserSessionManager,
+    BrowserStorageMode,
+    build_profile_catalog,
+    identity_launch_options,
+)
+
 from audience import TelegramAudience
 from config import Settings
 from site_cooldown import (
@@ -390,13 +403,46 @@ def recreate_profi_session(
         temporary_state.unlink()
 
     with sync_playwright() as playwright:
+        identity = load_browser_identity(
+            profile_path=settings.profi_browser_profile_path,
+            user_agent=settings.profi_user_agent,
+            impersonate=resolve_http_impersonate(
+                settings.profi_user_agent,
+                settings.profi_http_impersonate,
+            ),
+            locale=settings.profi_browser_locale,
+            timezone_id=settings.profi_browser_timezone,
+        )
+        profiles = build_profile_catalog(identity)
+        profile = profiles.get(DEFAULT_PROFILE_NAME)
         browser = playwright.chromium.launch(
-            **settings.playwright_launch_options(
-                headless=settings.session_recovery_headless,
+            **identity_launch_options(
+                settings.playwright_launch_options(
+                    headless=settings.session_recovery_headless,
+                ),
+                profile,
+                stealth=settings.profi_browser_stealth,
             )
         )
-        context = browser.new_context(viewport={"width": 1440, "height": 900})
-        page = context.new_page()
+        manager = BrowserSessionManager(
+            browser,
+            profiles,
+            auth_state_path=settings.auth_state_path,
+            extra_http_headers=identity.http_headers,
+            init_scripts=(stealth_init_script(identity),)
+            if settings.profi_browser_stealth
+            else (),
+        )
+        try:
+            session = manager.create_session(
+                profile.name,
+                storage_mode=BrowserStorageMode.FRESH,
+            )
+        except Exception:
+            browser.close()
+            raise
+        context = session.context
+        page = session.page
         phase = "открытие страницы входа"
         failed_requests: list[str] = []
 
@@ -529,7 +575,10 @@ def recreate_profi_session(
                     "После SMS-кода Profi.ru снова показал страницу входа"
                 )
 
-            context.storage_state(path=str(temporary_state))
+            context.storage_state(
+                path=str(temporary_state),
+                indexed_db=True,
+            )
             temporary_state.chmod(0o600)
             temporary_state.replace(settings.auth_state_path)
         except Exception as exc:
@@ -556,6 +605,7 @@ def recreate_profi_session(
                 screenshot_path=screenshot_path,
             ) from exc
         finally:
+            session.close()
             browser.close()
             with suppress(OSError):
                 temporary_state.unlink()

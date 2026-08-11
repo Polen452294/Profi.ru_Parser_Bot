@@ -252,7 +252,7 @@ class BrowserIdentityTests(unittest.TestCase):
         self.assertEqual(first.client_hint_architecture, third.client_hint_architecture)
         self.assertEqual(applied, [fourth])
 
-    def test_each_browser_start_gets_a_new_session_only_identity(self):
+    def test_regular_restart_preserves_auth_and_identity_until_explicit_purge(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = Settings.load(
                 env_file=None,
@@ -270,8 +270,8 @@ class BrowserIdentityTests(unittest.TestCase):
             (settings.profi_browser_profile_path / "Cookies").write_bytes(b"cookies")
             client.start()
 
-            self.assertFalse(settings.auth_state_path.exists())
-            self.assertEqual(list(settings.profi_browser_profile_path.iterdir()), [])
+            self.assertTrue(settings.auth_state_path.exists())
+            self.assertTrue((cache_dir / "cache.bin").exists())
 
             settings.auth_state_path.write_text("{}", encoding="utf-8")
             indexed_db = settings.profi_browser_profile_path / "Default" / "IndexedDB"
@@ -281,10 +281,14 @@ class BrowserIdentityTests(unittest.TestCase):
             client.close()
 
             self.assertEqual(len(opened), 2)
-            self.assertNotEqual(opened[0].identity_id, opened[1].identity_id)
-            self.assertNotEqual(opened[0].canvas_seed, opened[1].canvas_seed)
-            self.assertNotEqual(opened[0].audio_seed, opened[1].audio_seed)
-            self.assertNotEqual(opened[0].webgl_renderer, opened[1].webgl_renderer)
+            self.assertEqual(opened[0], opened[1])
+            self.assertIsNotNone(client._identity)
+            self.assertTrue(settings.auth_state_path.exists())
+            self.assertTrue((indexed_db / "data.leveldb").exists())
+            self.assertTrue(identity_path(settings.profi_browser_profile_path).exists())
+
+            client.purge_session_state()
+
             self.assertIsNone(client._identity)
             self.assertFalse(settings.auth_state_path.exists())
             self.assertEqual(list(settings.profi_browser_profile_path.iterdir()), [])

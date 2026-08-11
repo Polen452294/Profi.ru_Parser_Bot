@@ -119,6 +119,16 @@ bash check.sh
 Отсутствие `data/storage_state.json` до первого запуска не считается ошибкой:
 бот создаст сессию через SMS.
 
+Отдельно проверить реальную изоляцию BrowserContext на локальном стенде:
+
+```bash
+.venv/bin/python app.py session-audit
+```
+
+Команда не обращается к Profi.ru и проверяет cookies, localStorage,
+sessionStorage, IndexedDB, Cache Storage, Service Workers, permissions,
+стабильность browser environment и закрытие всех созданных контекстов.
+
 ### 5. Выполните первый тестовый запуск
 
 ```bash
@@ -284,6 +294,28 @@ User-Agent, Client Hints, locale, timezone и viewport. Identity хранитс�
 `curl_cffi`, а полученные `Set-Cookie` возвращаются в Chromium. Значение
 `PROFI_HTTP_IMPERSONATE=chrome` автоматически выбирает профиль, совпадающий с
 версией из `PROFI_USER_AGENT` (`chrome136` для настройки по умолчанию).
+
+BrowserContext создаются централизованно через `BrowserSessionManager`. Менеджер
+учитывает активные session ID, умеет закрыть оставшиеся контексты и журналирует
+ошибки cleanup. Есть два
+явных режима хранения состояния:
+
+- `fresh` — новый контекст без унаследованных cookies и site storage;
+- `authenticated` — контекст с загрузкой `data/storage_state.json`.
+
+Обычное закрытие или перезапуск Chromium не удаляет авторизацию и browser
+identity. Полная очистка выполняется только явным вызовом
+`ProfiClient.purge_session_state()`. Ручная авторизация, SMS-восстановление и
+основной парсер используют один профиль locale/timezone/viewport/User-Agent.
+Каталог содержит обычный профиль `profi_desktop` и отдельный профиль
+`profi_desktop_moscow_geo` с разрешением geolocation и координатами Москвы.
+
+После первого открытия доски в журнал записывается JSON `browser_snapshot`:
+browser/API-сигналы, названия cookies и storage-объектов без их значений. Модуль
+`browser_sessions.py` также предоставляет сравнение снимков и аудит утечек между
+двумя свежими контекстами. Реальные Chromium-тесты проверяют cookies,
+localStorage, sessionStorage, IndexedDB, Cache Storage, Service Workers и
+permissions, а также одновременную работу нескольких независимых контекстов.
 
 Stealth-настройки согласуют `navigator.webdriver`, `platform`, `languages` и
 `userAgentData`. При 12-часовом ограничении identity, cookies и IP не меняются:

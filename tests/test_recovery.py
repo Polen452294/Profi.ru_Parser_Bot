@@ -205,6 +205,9 @@ class RecoveryTests(unittest.TestCase):
             def goto(self, *args, **kwargs):
                 events.append("goto")
 
+            def close(self):
+                return None
+
             def get_by_test_id(self, test_id):
                 if test_id == "auth_login_input":
                     return Element(self, "login_input")
@@ -231,11 +234,21 @@ class RecoveryTests(unittest.TestCase):
                 raise IndexError(index)
 
         class Context:
+            def set_extra_http_headers(self, headers):
+                self.headers = headers
+
+            def add_init_script(self, **kwargs):
+                self.init_script = kwargs["script"]
+
             def new_page(self):
                 return Page()
 
-            def storage_state(self, path):
+            def storage_state(self, path, **kwargs):
+                self.storage_state_options = kwargs
                 Path(path).write_text("{}", encoding="utf-8")
+
+            def close(self):
+                return None
 
         class Browser:
             def new_context(self, **kwargs):

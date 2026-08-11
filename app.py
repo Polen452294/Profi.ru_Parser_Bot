@@ -317,6 +317,44 @@ def command_filter(text: str | None) -> int:
     return 0
 
 
+def command_session_audit(settings: Settings) -> int:
+    if not _runtime_preflight(settings, require_telegram=False):
+        return 2
+
+    from session_audit import run_local_session_audit
+
+    print("\nПроверка изоляции BrowserContext на локальном стенде\n")
+    try:
+        result = run_local_session_audit(settings)
+    except Exception as exc:
+        _print_check(
+            "ОШИБКА",
+            f"Аудит не выполнен: {type(exc).__name__}: {exc}",
+        )
+        return 1
+
+    checks = (
+        ("cookies", result.storage.cookies),
+        ("localStorage", result.storage.local_storage),
+        ("sessionStorage", result.storage.session_storage),
+        ("IndexedDB", result.storage.indexed_db),
+        ("Cache Storage", result.storage.cache_storage),
+        ("Service Workers", result.storage.service_workers),
+        ("permissions", result.storage.permissions),
+        ("browser environment", not result.environment_diff),
+        ("закрытие контекстов", result.active_sessions_after_audit == 0),
+        ("ошибки cleanup", not result.close_errors),
+    )
+    for name, passed in checks:
+        _print_check("OK" if passed else "ОШИБКА", name)
+    print()
+    if result.passed:
+        print("Изоляция браузерных сессий работает корректно.")
+        return 0
+    print("Аудит обнаружил проблему изоляции или жизненного цикла.")
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Парсер целевых заявок Profi.ru",
@@ -326,6 +364,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="проверить установку и настройки")
     subparsers.add_parser("run", help="запустить парсер и Telegram")
     subparsers.add_parser("parser", help="запустить только парсер")
+    subparsers.add_parser(
+        "session-audit",
+        help="проверить изоляцию BrowserContext на локальном стенде",
+    )
 
     auth_parser = subparsers.add_parser("auth", help="авторизоваться на Profi.ru")
     auth_parser.add_argument(
@@ -351,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_run(settings)
     if arguments.command == "parser":
         return command_parser(settings)
+    if arguments.command == "session-audit":
+        return command_session_audit(settings)
     if arguments.command == "auth":
         return command_auth(settings, force=arguments.force)
     if arguments.command == "filter":

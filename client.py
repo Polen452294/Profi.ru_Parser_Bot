@@ -22,9 +22,19 @@ from playwright.sync_api import (
 
 from browser_identity import (
     BrowserIdentity,
-    generate_browser_identity,
+    load_browser_identity,
     resolve_http_impersonate,
+    rotate_browser_identity,
     stealth_init_script,
+)
+from browser_sessions import (
+    DEFAULT_PROFILE_NAME,
+    BrowserSession,
+    BrowserSessionManager,
+    BrowserStorageMode,
+    build_profile_catalog,
+    collect_browser_snapshot,
+    snapshot_json,
 )
 from config import Settings
 
@@ -80,6 +90,11 @@ async () => {
       if (database.name) window.indexedDB.deleteDatabase(database.name);
     }
   }
+  if ('serviceWorker' in navigator) {
+    for (const registration of await navigator.serviceWorker.getRegistrations()) {
+      await registration.unregister();
+    }
+  }
 }
 """
 
@@ -98,30 +113,38 @@ class ProfiClient:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        self.browser_session: BrowserSession | None = None
+        self.session_manager: BrowserSessionManager | None = None
         self._identity: BrowserIdentity | None = None
         self._last_identity: BrowserIdentity | None = None
         self._curl_session: CurlSession | None = None
         self._cookie_bridge_completed = False
         self._tracing_active = False
+        self._snapshot_logged = False
 
     def _ensure_identity(self) -> BrowserIdentity:
         if self._identity is None:
-            self._identity = self._generate_session_identity()
+            self._identity = load_browser_identity(
+                profile_path=self.settings.profi_browser_profile_path,
+                user_agent=self.settings.profi_user_agent,
+                impersonate=resolve_http_impersonate(
+                    self.settings.profi_user_agent,
+                    self.settings.profi_http_impersonate,
+                ),
+                locale=self.settings.profi_browser_locale,
+                timezone_id=self.settings.profi_browser_timezone,
+            )
+            self._last_identity = self._identity
         return self._identity
 
     def _generate_session_identity(
         self,
         previous: BrowserIdentity | None = None,
     ) -> BrowserIdentity:
-        identity = generate_browser_identity(
-            user_agent=self.settings.profi_user_agent,
-            impersonate=resolve_http_impersonate(
-                self.settings.profi_user_agent,
-                self.settings.profi_http_impersonate,
-            ),
-            locale=self.settings.profi_browser_locale,
-            timezone_id=self.settings.profi_browser_timezone,
-            previous=previous if previous is not None else self._last_identity,
+        current = previous or self._ensure_identity()
+        identity = rotate_browser_identity(
+            profile_path=self.settings.profi_browser_profile_path,
+            current=current,
         )
         self._last_identity = identity
         return identity
@@ -147,18 +170,35 @@ class ProfiClient:
         launch_options["args"] = browser_args
         self.browser = self.playwright.chromium.launch(**launch_options)
 
-        context_options: dict[str, object] = {
-            "viewport": identity.viewport,
-            "screen": identity.screen,
-            "device_scale_factor": identity.device_scale_factor,
-            "user_agent": identity.user_agent,
-            "locale": identity.locale,
-            "timezone_id": identity.timezone_id,
-        }
-        self.context = self.browser.new_context(**context_options)
-        self.context.set_extra_http_headers(identity.http_headers)
-        if self.settings.profi_browser_stealth:
-            self.context.add_init_script(script=stealth_init_script(identity))
+        profiles = build_profile_catalog(identity)
+        profile = profiles.get(DEFAULT_PROFILE_NAME)
+        init_scripts = (
+            (stealth_init_script(identity),)
+            if self.settings.profi_browser_stealth
+            else ()
+        )
+        self.session_manager = BrowserSessionManager(
+            self.browser,
+            profiles,
+            auth_state_path=self.settings.auth_state_path,
+            extra_http_headers=identity.http_headers,
+            init_scripts=init_scripts,
+        )
+        storage_mode = (
+            BrowserStorageMode.AUTHENTICATED
+            if self.settings.auth_state_path.exists()
+            else BrowserStorageMode.FRESH
+        )
+        try:
+            self.browser_session = self.session_manager.create_session(
+                profile.name,
+                storage_mode=storage_mode,
+            )
+        except Exception:
+            self.close()
+            raise
+        self.context = self.browser_session.context
+        self.page = self.browser_session.page
         if self.settings.trace_on_failure:
             self.context.tracing.start(
                 screenshots=True,
@@ -166,12 +206,12 @@ class ProfiClient:
                 sources=False,
             )
             self._tracing_active = True
-        self.page = self.context.new_page()
         logger.info(
-            "Браузер запущен. headless=%s, сессия=%s, маршрут Profi.ru=%s/%s, "
+            "Браузер запущен. headless=%s, session=%s, storage=%s, маршрут Profi.ru=%s/%s, "
             "прокси=%s, identity=%s, viewport=%sx%s, impersonate=%s",
             self.settings.headless,
-            self.settings.auth_state_path.exists(),
+            self.browser_session.session_id,
+            storage_mode.value,
             self.proxy_index + 1,
             len(self.settings.profi_proxy_pool),
             "включён" if self.selected_proxy_url else "выключен",
@@ -201,6 +241,7 @@ class ProfiClient:
             self.next_proxy_index if proxy_index is None else proxy_index
         ) % len(self.settings.profi_proxy_pool)
         self.proxy_index = target_proxy_index
+        self._identity = self._generate_session_identity(previous_identity)
         self.start()
         current_identity = self._ensure_identity()
         logger.info(
@@ -216,32 +257,30 @@ class ProfiClient:
         return current_identity
 
     def close(self) -> None:
-        self._clear_active_browser_storage()
         if self._curl_session is not None:
             with suppress(Exception):
                 self._curl_session.close()
             self._curl_session = None
         self._cookie_bridge_completed = False
-        if self.page is not None:
-            with suppress(Exception):
-                self.page.close()
-            self.page = None
         if self.context is not None:
             if self._tracing_active:
                 with suppress(Exception):
                     self.context.tracing.stop()
                 self._tracing_active = False
+        if self.browser_session is not None:
+            self.browser_session.close()
+            self.browser_session = None
+        elif self.context is not None:
             with suppress(Exception):
                 self.context.close()
-            self.context = None
+        self.page = None
+        self.context = None
+        self.session_manager = None
         if self.browser is not None:
             with suppress(Exception):
                 self.browser.close()
             self.browser = None
-        if self._identity is not None:
-            self._last_identity = self._identity
-            self._identity = None
-        self._clear_browser_session_files()
+        self._snapshot_logged = False
 
     def _clear_active_browser_storage(self) -> None:
         page = self.page
@@ -252,6 +291,8 @@ class ProfiClient:
         if context is not None:
             with suppress(Exception):
                 context.clear_cookies()
+            with suppress(Exception):
+                context.clear_permissions()
             if page is not None:
                 with suppress(Exception):
                     cdp = context.new_cdp_session(page)
@@ -265,7 +306,11 @@ class ProfiClient:
                     cdp.send("Network.clearBrowserCache")
                     cdp.detach()
 
-    def _clear_browser_session_files(self) -> None:
+    def purge_session_state(self) -> None:
+        """Remove persisted authentication and browser identity explicitly."""
+        self.close()
+        self._identity = None
+        self._last_identity = None
         with suppress(OSError):
             self.settings.auth_state_path.unlink()
 
@@ -324,6 +369,16 @@ class ProfiClient:
             timeout=self.settings.page_timeout_ms,
         )
         self._check_response(response)
+        if not self._snapshot_logged and self.browser_session is not None:
+            try:
+                snapshot = collect_browser_snapshot(self.browser_session)
+                logger.info("browser_snapshot=%s", snapshot_json(snapshot))
+                self._snapshot_logged = True
+            except PlaywrightError as exc:
+                logger.warning(
+                    "Не удалось собрать browser snapshot: %s",
+                    type(exc).__name__,
+                )
 
     def _get_curl_session(self) -> CurlSession:
         if self._curl_session is not None:
@@ -428,13 +483,7 @@ class ProfiClient:
         )
 
     def _clear_browser_identity_state(self) -> None:
-        page = self.page
-        if page is not None:
-            with suppress(PlaywrightError):
-                page.evaluate(PROFI_SITE_DATA_CLEAR_SCRIPT)
-        if self.context is not None:
-            with suppress(PlaywrightError):
-                self.context.clear_cookies()
+        self._clear_active_browser_storage()
         if self._curl_session is not None:
             self._curl_session.cookies.clear()
 
@@ -449,6 +498,8 @@ class ProfiClient:
         browser_was_running = self.browser is not None
         if clear_site_data:
             self._clear_browser_identity_state()
+            with suppress(OSError):
+                self.settings.auth_state_path.unlink()
 
         current = self._generate_session_identity(previous)
         self._identity = current
@@ -469,6 +520,8 @@ class ProfiClient:
     def replace_blocked_identity(self, reason: str) -> None:
         previous = self._ensure_identity()
         self._clear_browser_identity_state()
+        with suppress(OSError):
+            self.settings.auth_state_path.unlink()
 
         if self.settings.profi_identity_rotate_on_repeat_block:
             self.create_browser_identity(
