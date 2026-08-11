@@ -56,19 +56,14 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 });
                 function showOtp() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
-                    document.body.innerHTML = Array.from({length: 4}, (_, index) =>
-                        `<input class="otp-cell" inputmode="numeric" maxlength="1" aria-label="Цифра ${index + 1}">`
-                    ).join('');
-                    const otpInputs = [...document.querySelectorAll('.otp-cell')];
-                    for (const [index, otp] of otpInputs.entries()) {
-                      otp.addEventListener('input', () => {
-                        if (otp.value && otpInputs[index + 1]) otpInputs[index + 1].focus();
-                        if (otpInputs.map((input) => input.value).join('') === '1234') {
+                    document.body.innerHTML = '<h2>Введите код из СМС</h2><input class="otp-code">';
+                    const otp = document.querySelector('.otp-code');
+                    otp.addEventListener('input', () => {
+                        if (otp.value === '1234') {
                             document.title = 'Заказы';
                             document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
                         }
-                      });
-                    }
+                    });
                 }
                 </script>
                 </body></html>

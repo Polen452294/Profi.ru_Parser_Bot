@@ -14,6 +14,7 @@ from session_recovery import (
     _fill_sms_code,
     _find_sms_code_root,
     _find_login_retry_later_text,
+    OTP_VISIBLE_INPUT_FALLBACK_SELECTOR,
     normalize_sms_code,
     recreate_profi_session,
 )
@@ -556,6 +557,27 @@ class RecoveryTests(unittest.TestCase):
                 ("sequential", "4", 80),
             ],
         )
+
+    def test_unmarked_single_otp_input_is_found_and_typed_sequentially(self):
+        target = FakeInput()
+
+        class EmptyInputs:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                raise IndexError(index)
+
+        class Root:
+            def locator(self, selector):
+                if selector == OTP_VISIBLE_INPUT_FALLBACK_SELECTOR:
+                    return FakeInputsWithItems([target])
+                return EmptyInputs()
+
+        _fill_sms_code(Root(), "unused", "4821")
+
+        self.assertEqual(target.value, "4821")
+        self.assertEqual(target.pressed[-1], ("sequential", "4821", 80))
 
     def test_old_value_is_cleared_before_sms_code_is_requested(self):
         page = FakePage(input_count=1)

@@ -51,6 +51,8 @@ PIN_DESCENDANT_SELECTOR = (
 )
 OTP_SEMANTIC_SELECTOR = (
     'input[autocomplete="one-time-code"], '
+    'input[aria-label*="код" i], '
+    'input[placeholder*="код" i], '
     'input[name*="pin" i], '
     'input[id*="pin" i], '
     'input[name*="otp" i], '
@@ -59,6 +61,11 @@ OTP_SEMANTIC_SELECTOR = (
     'input[inputmode="numeric"][maxlength="1"], '
     'input[type="tel"][maxlength="1"], '
     'input[type="text"][maxlength="1"]'
+)
+OTP_VISIBLE_INPUT_FALLBACK_SELECTOR = (
+    'input:not([type="hidden"]):not([type="tel"]), '
+    'textarea:not([disabled]):not([readonly]), '
+    '[contenteditable="true"]'
 )
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
 SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
@@ -172,6 +179,8 @@ def _usable_sms_inputs(root, selector: str) -> list:
         selectors.append(selector)
     if OTP_SEMANTIC_SELECTOR not in selectors:
         selectors.append(OTP_SEMANTIC_SELECTOR)
+    if OTP_VISIBLE_INPUT_FALLBACK_SELECTOR not in selectors:
+        selectors.append(OTP_VISIBLE_INPUT_FALLBACK_SELECTOR)
 
     for candidate_selector in selectors:
         inputs = root.locator(candidate_selector)
