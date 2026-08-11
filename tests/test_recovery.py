@@ -9,6 +9,7 @@ from config import Settings
 from session_recovery import (
     LoginRetryLaterError,
     SessionRecoveryManager,
+    _clear_sms_code_inputs,
     _fill_login_input,
     _fill_sms_code,
     _find_sms_code_root,
@@ -57,8 +58,15 @@ class FakeInput:
 
     def press(self, key):
         self.pressed.append(key)
+        if key == "Backspace":
+            self.value = ""
+            return
         if key.isdigit():
             self.value += key
+
+    def press_sequentially(self, value, delay=0):
+        self.pressed.append(("sequential", value, delay))
+        self.value += value
 
 
 class FakeInputs:
@@ -105,7 +113,7 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertEqual(events, [("fill", "+79990000000")])
 
-    def test_sms_is_requested_after_sms_method_and_before_otp_lookup(self):
+    def test_sms_is_requested_only_after_otp_field_is_cleared(self):
         events = []
 
         class Element:
@@ -177,8 +185,18 @@ class RecoveryTests(unittest.TestCase):
 
             def press(self, key):
                 events.append(("press", key))
+                if self.kind == "otp" and key == "Backspace":
+                    self.value = ""
+                    return
                 if self.kind == "otp" and key.isdigit():
                     self.value += key
+                    if len(self.value) == 4:
+                        self.page.otp_closed = True
+
+            def press_sequentially(self, value, delay=0):
+                events.append(("press_sequentially", value, delay))
+                if self.kind == "otp":
+                    self.value += value
                     if len(self.value) == 4:
                         self.page.otp_closed = True
 
@@ -316,11 +334,15 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertNotIn("mts_method_click", events)
         self.assertNotIn("login_click", events)
+        self.assertLess(events.index("otp_lookup"), events.index(("fill", "")))
+        self.assertLess(events.index(("fill", "")), events.index("announce"))
         self.assertLess(events.index("sms_method_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
-        self.assertLess(events.index("code"), events.index("otp_lookup"))
-        self.assertLess(events.index("code"), events.index(("fill", "8796")))
-        self.assertEqual(events.count(("fill", "8796")), 1)
+        self.assertLess(
+            events.index("code"),
+            events.index(("press_sequentially", "8796", 80)),
+        )
+        self.assertEqual(events.count(("press_sequentially", "8796", 80)), 1)
         self.assertNotIn(("press", "Enter"), events)
 
     def test_sms_code_normalization(self):
@@ -509,13 +531,24 @@ class RecoveryTests(unittest.TestCase):
         _fill_sms_code(page, "unused", "1234")
 
         self.assertEqual(page.inputs.items[0].value, "1234")
-        self.assertEqual(page.inputs.items[0].pressed, [])
-        self.assertEqual(page.inputs.items[0].clicks, 0)
+        self.assertEqual(
+            page.inputs.items[0].pressed,
+            ["ControlOrMeta+A", "Backspace", ("sequential", "1234", 80)],
+        )
+        self.assertEqual(page.inputs.items[0].clicks, 1)
         self.assertIn("auth_pin_input", page.seen_selectors[0])
+
+    def test_old_value_is_cleared_before_sms_code_is_requested(self):
+        page = FakePage(input_count=1)
+        page.inputs.items[0].value = "+79990000000"
+
+        _clear_sms_code_inputs(page, "unused")
+
+        self.assertEqual(page.inputs.items[0].value, "")
 
     def test_sms_fill_reports_when_field_rejects_value(self):
         class RejectingInput(FakeInput):
-            def fill(self, value):
+            def press_sequentially(self, value, delay=0):
                 return None
 
         page = FakePage(input_count=1)

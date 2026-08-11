@@ -65,6 +65,7 @@ LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
 LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
 OTP_FILL_DELAY_SEC = 1.0
+OTP_KEY_DELAY_MS = 80
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"(?:можно\s+будет\s+)?повтор(?:ить|ите)\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
@@ -368,7 +369,10 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
     input_locator = visible_inputs[0]
-    input_locator.fill(code)
+    input_locator.click()
+    input_locator.press("ControlOrMeta+A")
+    input_locator.press("Backspace")
+    input_locator.press_sequentially(code, delay=OTP_KEY_DELAY_MS)
 
     try:
         try:
@@ -383,6 +387,27 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         raise SessionRecoveryError(
             "Поле auth_pin_input найдено, но не приняло переданный SMS-код"
         )
+
+
+def _clear_sms_code_inputs(root, selector: str) -> None:
+    """Удаляет значение, унаследованное OTP-полем до запроса кода у пользователя."""
+    visible_inputs = _usable_sms_inputs(root, selector)
+    if not visible_inputs:
+        raise SessionRecoveryError("Поле для SMS-кода не найдено")
+
+    for input_locator in visible_inputs:
+        input_locator.fill("")
+        try:
+            try:
+                actual_value = input_locator.input_value(timeout=500)
+            except TypeError:
+                actual_value = input_locator.input_value()
+        except (AttributeError, PlaywrightError):
+            continue
+        if actual_value:
+            raise SessionRecoveryError(
+                "Поле auth_pin_input не удалось очистить перед ожиданием нового SMS-кода"
+            )
 
 
 def recreate_profi_session(
@@ -502,8 +527,26 @@ def recreate_profi_session(
                 LOGIN_POST_CLICK_STATUS_CHECK_SEC,
             )
 
-            # До получения четырёх цифр не ищем поле и никак с ним не
-            # взаимодействуем. Сначала только открываем приём кода в Telegram.
+            # Сайт может переиспользовать DOM-элемент телефона для OTP и оставить
+            # в нём прежнее значение. Новую форму сначала находим и очищаем, и
+            # только после этого разрешаем Telegram принять код пользователя.
+            phase = "поиск новой формы SMS-кода"
+            otp_root = _wait_for_sms_code_root(
+                page,
+                settings.profi_otp_selector,
+                min(settings.page_timeout_ms, 30_000),
+            )
+            if otp_root is None:
+                raise SessionRecoveryError(
+                    "После запроса SMS поле auth_pin_input не найдено или недоступно"
+                )
+
+            phase = "очистка поля перед ожиданием SMS-кода"
+            _clear_sms_code_inputs(
+                otp_root,
+                settings.profi_otp_selector,
+            )
+
             on_sms_requested()
 
             phase = "ожидание SMS-кода из Telegram"
