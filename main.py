@@ -126,36 +126,6 @@ def _raise_access_challenge(
     raise AccessChallengeError(reason)
 
 
-def _restart_after_ip_limit(
-    client: ProfiClient,
-    playwright,
-    settings: Settings,
-    heartbeat: HeartbeatReporter,
-    reason: str,
-    *,
-    proxy_index: int,
-    reset_identity: bool,
-) -> ProfiClient:
-    client.save_debug("ip_rotation_limit")
-    if reset_identity:
-        client.replace_blocked_identity(reason)
-    logger.warning(
-        "%s. Переключаю маршрут Profi.ru на %s/%s",
-        reason,
-        proxy_index + 1,
-        len(settings.profi_proxy_pool),
-    )
-    heartbeat.mark_failure(reason)
-    time.sleep(min(10, settings.poll_base_sec))
-    return _restart_client(
-        client,
-        playwright,
-        settings,
-        "12-часовой лимит для текущего IP",
-        proxy_index=proxy_index,
-    )
-
-
 def _page_looks_logged_out(client: ProfiClient) -> bool:
     if client.page is None:
         return False

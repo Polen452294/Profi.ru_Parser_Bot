@@ -67,6 +67,16 @@ OTP_VISIBLE_INPUT_FALLBACK_SELECTOR = (
     'textarea:not([disabled]):not([readonly]), '
     '[contenteditable="true"]'
 )
+OTP_PAGE_TEXT_MARKERS = (
+    "введите код",
+    "ввести код",
+    "код из смс",
+    "код из sms",
+    "смс-код",
+    "sms-код",
+    "код подтверждения",
+    "одноразовый код",
+)
 SMS_LOGIN_BUTTON_SELECTOR = '[data-testid="enter_with_sms_btn"]'
 SMS_LOGIN_BUTTON_TEXT_PATTERN = re.compile(
     r"войти\s+по\s+сим[\s‑–—-]*пушу\s+или\s+(?:смс|sms)",
@@ -179,9 +189,6 @@ def _usable_sms_inputs(root, selector: str) -> list:
         selectors.append(selector)
     if OTP_SEMANTIC_SELECTOR not in selectors:
         selectors.append(OTP_SEMANTIC_SELECTOR)
-    if OTP_VISIBLE_INPUT_FALLBACK_SELECTOR not in selectors:
-        selectors.append(OTP_VISIBLE_INPUT_FALLBACK_SELECTOR)
-
     for candidate_selector in selectors:
         inputs = root.locator(candidate_selector)
         usable = []
@@ -205,7 +212,41 @@ def _usable_sms_inputs(root, selector: str) -> list:
             usable.append(candidate)
         if usable:
             return usable
+
+    # Последний запасной вариант намеренно широкий, поэтому разрешаем его
+    # только на странице, которая явно сообщает о вводе SMS/одноразового кода.
+    # Иначе поле поиска или другой input на промежуточном экране можно ошибочно
+    # принять за OTP и запросить код у пользователя слишком рано.
+    if not _root_looks_like_sms_code_page(root):
+        return []
+
+    inputs = root.locator(OTP_VISIBLE_INPUT_FALLBACK_SELECTOR)
+    usable = []
+    for index in range(inputs.count()):
+        candidate = inputs.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            if hasattr(candidate, "is_enabled") and not candidate.is_enabled():
+                continue
+            if hasattr(candidate, "is_editable") and not candidate.is_editable():
+                continue
+        except PlaywrightError:
+            continue
+        usable.append(candidate)
+    if usable:
+        return usable
     return []
+
+
+def _root_looks_like_sms_code_page(root) -> bool:
+    try:
+        body_text = " ".join(
+            root.locator("body").inner_text(timeout=1_000).casefold().split()
+        )
+    except (AttributeError, PlaywrightError):
+        return False
+    return any(marker in body_text for marker in OTP_PAGE_TEXT_MARKERS)
 
 
 def _candidate_pages(page) -> list:
@@ -231,7 +272,7 @@ def _candidate_pages(page) -> list:
     return unique_pages
 
 
-def _find_sms_code_root(page, selector: str):
+def _candidate_roots(page) -> list:
     roots = []
     for candidate_page in _candidate_pages(page):
         roots.append(candidate_page)
@@ -240,7 +281,11 @@ def _find_sms_code_root(page, selector: str):
             for frame in getattr(candidate_page, "frames", [])
             if frame is not getattr(candidate_page, "main_frame", None)
         )
-    for root in roots:
+    return roots
+
+
+def _find_sms_code_root(page, selector: str):
+    for root in _candidate_roots(page):
         try:
             if _usable_sms_inputs(root, selector):
                 return root
@@ -344,7 +389,10 @@ def _click_verified_sms_login_button(control) -> None:
 def _wait_for_sms_code_root(page, selector: str, timeout_ms: int):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
-        _raise_if_login_retry_later(page)
+        # Переход к OTP может проходить через любое число навигаций, popup и
+        # iframe. На каждой итерации получаем актуальный список корней заново.
+        for root in _candidate_roots(page):
+            _raise_if_login_retry_later(root)
         root = _find_sms_code_root(page, selector)
         if root is not None:
             return root
@@ -557,7 +605,7 @@ def recreate_profi_session(
             otp_root = _wait_for_sms_code_root(
                 page,
                 settings.profi_otp_selector,
-                min(settings.page_timeout_ms, 30_000),
+                settings.page_timeout_ms,
             )
             if otp_root is None:
                 raise SessionRecoveryError(
@@ -589,7 +637,7 @@ def recreate_profi_session(
             otp_root = _wait_for_sms_code_root(
                 page,
                 settings.profi_otp_selector,
-                min(settings.page_timeout_ms, 30_000),
+                settings.page_timeout_ms,
             )
             if otp_root is None:
                 raise SessionRecoveryError(

@@ -32,6 +32,31 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <div>Можно будет повторить через 12 часов</div>
                 </body></html>
             """
+        elif self.path.startswith("/recovery-intermediate"):
+            body = """
+                <html><title>Переход</title><body>
+                <h2>Подождите, выполняется переход</h2>
+                <input id="intermediate-search" placeholder="Поиск">
+                <script>
+                    setTimeout(() => location.href='/recovery-otp', 1200);
+                </script>
+                </body></html>
+            """
+        elif self.path.startswith("/recovery-otp"):
+            body = """
+                <html><title>Подтверждение</title><body>
+                <h2>Введите код из СМС</h2><input class="otp-code">
+                <script>
+                    const otp = document.querySelector('.otp-code');
+                    otp.addEventListener('input', () => {
+                        if (otp.value === '1234') {
+                            document.title = 'Заказы';
+                            document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
+                        }
+                    });
+                </script>
+                </body></html>
+            """
         elif self.path.startswith("/recovery"):
             body = """
                 <html><title>Вход на Профи.ру</title><body>
@@ -56,14 +81,7 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 });
                 function showOtp() {
                     if (!document.querySelector('[data-testid="auth_login_input"]').value) return;
-                    document.body.innerHTML = '<h2>Введите код из СМС</h2><input class="otp-code">';
-                    const otp = document.querySelector('.otp-code');
-                    otp.addEventListener('input', () => {
-                        if (otp.value === '1234') {
-                            document.title = 'Заказы';
-                            document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
-                        }
-                    });
+                    location.href = '/recovery-intermediate';
                 }
                 </script>
                 </body></html>

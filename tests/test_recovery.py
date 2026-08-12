@@ -572,12 +572,42 @@ class RecoveryTests(unittest.TestCase):
             def locator(self, selector):
                 if selector == OTP_VISIBLE_INPUT_FALLBACK_SELECTOR:
                     return FakeInputsWithItems([target])
+                if selector == "body":
+                    return Body()
                 return EmptyInputs()
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Введите код из СМС"
 
         _fill_sms_code(Root(), "unused", "4821")
 
         self.assertEqual(target.value, "4821")
         self.assertEqual(target.pressed[-1], ("sequential", "4821", 80))
+
+    def test_intermediate_page_input_is_not_treated_as_sms_field(self):
+        target = FakeInput()
+
+        class EmptyInputs:
+            def count(self):
+                return 0
+
+            def nth(self, index):
+                raise IndexError(index)
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Подождите, выполняется переход на следующий этап"
+
+        class Root:
+            def locator(self, selector):
+                if selector == OTP_VISIBLE_INPUT_FALLBACK_SELECTOR:
+                    return FakeInputsWithItems([target])
+                if selector == "body":
+                    return Body()
+                return EmptyInputs()
+
+        self.assertIsNone(_find_sms_code_root(Root(), "unused"))
 
     def test_old_value_is_cleared_before_sms_code_is_requested(self):
         page = FakePage(input_count=1)
