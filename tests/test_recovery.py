@@ -9,10 +9,10 @@ from config import Settings
 from session_recovery import (
     LoginRetryLaterError,
     SessionRecoveryManager,
-    _clear_sms_code_inputs,
     _fill_login_input,
     _fill_sms_code,
     _find_sms_code_root,
+    _find_sms_code_screen,
     _find_login_retry_later_text,
     OTP_VISIBLE_INPUT_FALLBACK_SELECTOR,
     normalize_sms_code,
@@ -114,7 +114,7 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertEqual(events, [("fill", "+79990000000")])
 
-    def test_sms_is_requested_only_after_otp_field_is_cleared(self):
+    def test_sms_is_requested_before_any_otp_field_interaction(self):
         events = []
 
         class Element:
@@ -335,10 +335,17 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertNotIn("mts_method_click", events)
         self.assertNotIn("login_click", events)
-        self.assertLess(events.index("otp_lookup"), events.index(("fill", "")))
-        self.assertLess(events.index(("fill", "")), events.index("announce"))
         self.assertLess(events.index("sms_method_click"), events.index("announce"))
         self.assertLess(events.index("announce"), events.index("code"))
+        otp_interactions = [
+            index
+            for index, event in enumerate(events)
+            if event == "otp_focus"
+            or (isinstance(event, tuple) and event[0] in {"press", "press_sequentially"})
+            or event == ("fill", "")
+        ]
+        self.assertTrue(otp_interactions)
+        self.assertGreater(min(otp_interactions), events.index("code"))
         self.assertLess(
             events.index("code"),
             events.index(("press_sequentially", "8796", 80)),
@@ -609,13 +616,32 @@ class RecoveryTests(unittest.TestCase):
 
         self.assertIsNone(_find_sms_code_root(Root(), "unused"))
 
-    def test_old_value_is_cleared_before_sms_code_is_requested(self):
-        page = FakePage(input_count=1)
-        page.inputs.items[0].value = "+79990000000"
+    def test_sms_screen_is_detected_by_heading_before_input_is_rendered(self):
+        class EmptyInputs:
+            def count(self):
+                return 0
 
-        _clear_sms_code_inputs(page, "unused")
+            def nth(self, index):
+                raise IndexError(index)
 
-        self.assertEqual(page.inputs.items[0].value, "")
+        class Body:
+            def inner_text(self, timeout):
+                return "Введите проверочный код из сообщения"
+
+        class Root:
+            frames = []
+            main_frame = None
+
+            def locator(self, selector):
+                if selector == "body":
+                    return Body()
+                return EmptyInputs()
+
+            def is_closed(self):
+                return False
+
+        root = Root()
+        self.assertIs(_find_sms_code_screen(root, "unused"), root)
 
     def test_sms_fill_reports_when_field_rejects_value(self):
         class RejectingInput(FakeInput):
