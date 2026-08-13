@@ -48,12 +48,25 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
                 <h2>Введите код из СМС</h2><input class="otp-code">
                 <script>
                     const otp = document.querySelector('.otp-code');
-                    otp.addEventListener('input', () => {
-                        if (otp.value === '1234') {
+                    let keydowns = '';
+                    let keyups = '';
+                    otp.addEventListener('keydown', (event) => {
+                        if (/^\\d$/.test(event.key)) keydowns += event.key;
+                    });
+                    otp.addEventListener('keyup', (event) => {
+                        if (/^\\d$/.test(event.key)) keyups += event.key;
+                        acceptCodeWhenFullyTyped();
+                    });
+                    function acceptCodeWhenFullyTyped() {
+                        if (
+                            otp.value === '1234' &&
+                            keydowns === '1234' &&
+                            keyups === '1234'
+                        ) {
                             document.title = 'Заказы';
                             document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
                         }
-                    });
+                    }
                 </script>
                 </body></html>
             """

@@ -90,7 +90,7 @@ LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
 LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
 OTP_FILL_DELAY_SEC = 1.0
-OTP_INTER_DIGIT_DELAY_SEC = 0.16
+OTP_KEY_DELAY_MS = 160
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"(?:можно\s+будет\s+)?повтор(?:ить|ите)\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
@@ -457,25 +457,37 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
     if not visible_inputs:
         raise SessionRecoveryError("Поле для SMS-кода не найдено")
 
+    existing_parts = []
     for input_locator in visible_inputs:
-        input_locator.click()
-        input_locator.press("ControlOrMeta+A")
-        input_locator.press("Backspace")
+        try:
+            existing_parts.append(input_locator.input_value(timeout=500))
+        except TypeError:
+            existing_parts.append(input_locator.input_value())
+        except (AttributeError, PlaywrightError):
+            existing_parts.append("")
 
-    if len(visible_inputs) >= len(code):
-        digit_targets = list(zip(visible_inputs, code, strict=False))
-    else:
-        digit_targets = [(visible_inputs[0], digit) for digit in code]
-
-    for index, (input_locator, digit) in enumerate(digit_targets):
-        # A real keyboard event is dispatched for every digit.  This is more
-        # compatible with controlled OTP fields than assigning the complete
-        # value at once and lets the page move focus between split inputs.
-        if len(visible_inputs) >= len(code):
+    # A newly rendered OTP form is already empty. Avoid sending Ctrl+A and
+    # Backspace in the normal path: a user simply focuses the first cell and
+    # starts typing. Only clear a value when the site has actually left one.
+    if any(existing_parts):
+        for input_locator, existing_value in zip(
+            visible_inputs,
+            existing_parts,
+            strict=False,
+        ):
+            if not existing_value:
+                continue
             input_locator.click()
-        input_locator.press(digit)
-        if index < len(digit_targets) - 1:
-            time.sleep(OTP_INTER_DIGIT_DELAY_SEC)
+            input_locator.press("ControlOrMeta+A")
+            input_locator.press("Backspace")
+
+    # Playwright's keyboard typing emits keydown, keypress/input and keyup for
+    # every character. Focusing only the first field also allows the site's own
+    # OTP component to move focus between split cells, exactly as it does for a
+    # physical keyboard.
+    first_input = visible_inputs[0]
+    first_input.click()
+    first_input.press_sequentially(code, delay=OTP_KEY_DELAY_MS)
 
     try:
         actual_parts = []

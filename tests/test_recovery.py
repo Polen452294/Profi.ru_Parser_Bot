@@ -346,16 +346,10 @@ class RecoveryTests(unittest.TestCase):
         ]
         self.assertTrue(otp_interactions)
         self.assertGreater(min(otp_interactions), events.index("code"))
-        digit_events = [("press", digit) for digit in "8796"]
-        self.assertLess(events.index("code"), events.index(digit_events[0]))
-        self.assertEqual(
-            [event for event in events if event in digit_events],
-            digit_events,
-        )
-        self.assertNotIn(
-            ("press_sequentially", "8796", 80),
-            events,
-        )
+        typing_event = ("press_sequentially", "8796", 160)
+        self.assertLess(events.index("code"), events.index(typing_event))
+        self.assertEqual(events.count(typing_event), 1)
+        self.assertNotIn(("press", "1"), events)
         self.assertNotIn(("press", "Enter"), events)
 
     def test_sms_code_normalization(self):
@@ -546,13 +540,21 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(page.inputs.items[0].value, "1234")
         self.assertEqual(
             page.inputs.items[0].pressed,
-            ["ControlOrMeta+A", "Backspace", "1", "2", "3", "4"],
+            [("sequential", "1234", 160)],
         )
         self.assertEqual(page.inputs.items[0].clicks, 1)
         self.assertIn("auth_pin_input", page.seen_selectors[0])
 
     def test_sms_code_is_entered_into_four_separate_inputs(self):
         page = FakePage(input_count=4)
+        first_input = page.inputs.items[0]
+
+        def distribute_like_otp_component(value, delay=0):
+            first_input.pressed.append(("sequential", value, delay))
+            for target, digit in zip(page.inputs.items, value, strict=False):
+                target.value = digit
+
+        first_input.press_sequentially = distribute_like_otp_component
 
         _fill_sms_code(page, "unused", "1234")
 
@@ -561,9 +563,11 @@ class RecoveryTests(unittest.TestCase):
             ["1", "2", "3", "4"],
         )
         self.assertEqual(
-            [item.pressed[-1] for item in page.inputs.items],
-            ["1", "2", "3", "4"],
+            first_input.pressed,
+            [("sequential", "1234", 160)],
         )
+        self.assertEqual(first_input.clicks, 1)
+        self.assertTrue(all(item.clicks == 0 for item in page.inputs.items[1:]))
 
     def test_unmarked_single_otp_input_is_found_and_typed_digit_by_digit(self):
         target = FakeInput()
@@ -590,7 +594,7 @@ class RecoveryTests(unittest.TestCase):
         _fill_sms_code(Root(), "unused", "4821")
 
         self.assertEqual(target.value, "4821")
-        self.assertEqual(target.pressed[-4:], ["4", "8", "2", "1"])
+        self.assertEqual(target.pressed, [("sequential", "4821", 160)])
 
     def test_intermediate_page_input_is_not_treated_as_sms_field(self):
         target = FakeInput()
@@ -645,8 +649,8 @@ class RecoveryTests(unittest.TestCase):
 
     def test_sms_fill_reports_when_field_rejects_value(self):
         class RejectingInput(FakeInput):
-            def press(self, key):
-                self.pressed.append(key)
+            def press_sequentially(self, value, delay=0):
+                self.pressed.append(("sequential", value, delay))
                 return None
 
         page = FakePage(input_count=1)
