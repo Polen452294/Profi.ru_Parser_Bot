@@ -90,7 +90,7 @@ LOGIN_BUTTON_RENDER_DELAY_SEC = 1.0
 LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
 OTP_FILL_DELAY_SEC = 1.0
-OTP_KEY_DELAY_MS = 80
+OTP_INTER_DIGIT_DELAY_SEC = 0.16
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"(?:можно\s+будет\s+)?повтор(?:ить|ите)\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
@@ -463,11 +463,19 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         input_locator.press("Backspace")
 
     if len(visible_inputs) >= len(code):
-        for input_locator, digit in zip(visible_inputs, code, strict=False):
-            input_locator.click()
-            input_locator.press_sequentially(digit, delay=OTP_KEY_DELAY_MS)
+        digit_targets = list(zip(visible_inputs, code, strict=False))
     else:
-        visible_inputs[0].press_sequentially(code, delay=OTP_KEY_DELAY_MS)
+        digit_targets = [(visible_inputs[0], digit) for digit in code]
+
+    for index, (input_locator, digit) in enumerate(digit_targets):
+        # A real keyboard event is dispatched for every digit.  This is more
+        # compatible with controlled OTP fields than assigning the complete
+        # value at once and lets the page move focus between split inputs.
+        if len(visible_inputs) >= len(code):
+            input_locator.click()
+        input_locator.press(digit)
+        if index < len(digit_targets) - 1:
+            time.sleep(OTP_INTER_DIGIT_DELAY_SEC)
 
     try:
         actual_parts = []

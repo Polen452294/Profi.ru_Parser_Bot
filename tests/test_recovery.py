@@ -346,11 +346,16 @@ class RecoveryTests(unittest.TestCase):
         ]
         self.assertTrue(otp_interactions)
         self.assertGreater(min(otp_interactions), events.index("code"))
-        self.assertLess(
-            events.index("code"),
-            events.index(("press_sequentially", "8796", 80)),
+        digit_events = [("press", digit) for digit in "8796"]
+        self.assertLess(events.index("code"), events.index(digit_events[0]))
+        self.assertEqual(
+            [event for event in events if event in digit_events],
+            digit_events,
         )
-        self.assertEqual(events.count(("press_sequentially", "8796", 80)), 1)
+        self.assertNotIn(
+            ("press_sequentially", "8796", 80),
+            events,
+        )
         self.assertNotIn(("press", "Enter"), events)
 
     def test_sms_code_normalization(self):
@@ -541,7 +546,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(page.inputs.items[0].value, "1234")
         self.assertEqual(
             page.inputs.items[0].pressed,
-            ["ControlOrMeta+A", "Backspace", ("sequential", "1234", 80)],
+            ["ControlOrMeta+A", "Backspace", "1", "2", "3", "4"],
         )
         self.assertEqual(page.inputs.items[0].clicks, 1)
         self.assertIn("auth_pin_input", page.seen_selectors[0])
@@ -557,15 +562,10 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.pressed[-1] for item in page.inputs.items],
-            [
-                ("sequential", "1", 80),
-                ("sequential", "2", 80),
-                ("sequential", "3", 80),
-                ("sequential", "4", 80),
-            ],
+            ["1", "2", "3", "4"],
         )
 
-    def test_unmarked_single_otp_input_is_found_and_typed_sequentially(self):
+    def test_unmarked_single_otp_input_is_found_and_typed_digit_by_digit(self):
         target = FakeInput()
 
         class EmptyInputs:
@@ -590,7 +590,7 @@ class RecoveryTests(unittest.TestCase):
         _fill_sms_code(Root(), "unused", "4821")
 
         self.assertEqual(target.value, "4821")
-        self.assertEqual(target.pressed[-1], ("sequential", "4821", 80))
+        self.assertEqual(target.pressed[-4:], ["4", "8", "2", "1"])
 
     def test_intermediate_page_input_is_not_treated_as_sms_field(self):
         target = FakeInput()
@@ -645,7 +645,8 @@ class RecoveryTests(unittest.TestCase):
 
     def test_sms_fill_reports_when_field_rejects_value(self):
         class RejectingInput(FakeInput):
-            def press_sequentially(self, value, delay=0):
+            def press(self, key):
+                self.pressed.append(key)
                 return None
 
         page = FakePage(input_count=1)
