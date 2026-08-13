@@ -45,28 +45,35 @@ class FakeProfiHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/recovery-otp"):
             body = """
                 <html><title>Подтверждение</title><body>
-                <h2>Введите код из СМС</h2><input class="otp-code">
+                <h2>Введите код из СМС</h2>
+                <div id="pin-shell" onclick="otp.focus()">
+                    <span>_</span><span>_</span><span>_</span><span>_</span>
+                </div>
+                <input data-testid="auth_pin_input" type="tel" autofocus
+                       style="position:absolute;opacity:0;height:0;padding:0;border:0">
                 <script>
-                    const otp = document.querySelector('.otp-code');
-                    let keydowns = '';
-                    let keyups = '';
-                    otp.addEventListener('keydown', (event) => {
-                        if (/^\\d$/.test(event.key)) keydowns += event.key;
+                    const otp = document.querySelector('[data-testid="auth_pin_input"]');
+                    let trustedPaste = false;
+                    let pasteInputType = false;
+                    otp.addEventListener('paste', (event) => {
+                        trustedPaste = event.isTrusted &&
+                            event.clipboardData.getData('text/plain') === '1234';
                     });
-                    otp.addEventListener('keyup', (event) => {
-                        if (/^\\d$/.test(event.key)) keyups += event.key;
-                        acceptCodeWhenFullyTyped();
+                    otp.addEventListener('beforeinput', (event) => {
+                        pasteInputType = event.isTrusted &&
+                            event.inputType === 'insertFromPaste';
                     });
-                    function acceptCodeWhenFullyTyped() {
+                    otp.addEventListener('input', (event) => {
                         if (
                             otp.value === '1234' &&
-                            keydowns === '1234' &&
-                            keyups === '1234'
+                            trustedPaste &&
+                            pasteInputType &&
+                            event.isTrusted
                         ) {
                             document.title = 'Заказы';
                             document.body.innerHTML = '<a data-testid="42_order-snippet" href="/orders/42"><h3>Кровельные работы</h3></a>';
                         }
-                    }
+                    });
                 </script>
                 </body></html>
             """

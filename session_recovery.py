@@ -7,6 +7,7 @@ from queue import Empty, Full, Queue
 import re
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 from aiogram import Bot
 from playwright.sync_api import Error as PlaywrightError
@@ -91,10 +92,17 @@ LOGIN_POST_CLICK_STATUS_CHECK_SEC = 1.0
 OTP_FIELD_RENDER_DELAY_SEC = 1.0
 OTP_FILL_DELAY_SEC = 1.0
 OTP_KEY_DELAY_MS = 160
+CLIPBOARD_PERMISSIONS = ["clipboard-read", "clipboard-write"]
 LOGIN_RETRY_LATER_PATTERN = re.compile(
     r"(?:можно\s+будет\s+)?повтор(?:ить|ите)\s+через\s+\d+(?:[.,]\d+)?\s*"
     r"(?:(?:часов|часа|час)\b|ч\.?(?=\s|$))",
     re.IGNORECASE,
+)
+POST_OTP_ERROR_PATTERNS = (
+    re.compile(r"что-то\s+пошло\s+не\s+так", re.IGNORECASE),
+    re.compile(r"попробуйте\s+повторить\s+попытку\s+позже", re.IGNORECASE),
+    re.compile(r"(?:неверный|неправильный)\s+(?:смс[-\s]*)?код", re.IGNORECASE),
+    re.compile(r"код\s+(?:устарел|ист[её]к|не\s+подходит)", re.IGNORECASE),
 )
 PHONE_INPUT_SELECTOR = (
     'input[type="tel"], '
@@ -151,6 +159,7 @@ def _save_recovery_debug(
     phase: str,
     error: Exception,
     failed_requests: list[str],
+    auth_responses: list[str] | None = None,
 ) -> Path:
     settings.debug_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = settings.debug_dir / "session_recovery_failed.png"
@@ -159,11 +168,53 @@ def _save_recovery_debug(
     for path in (screenshot_path, html_path, details_path):
         with suppress(OSError):
             path.unlink()
+    private_values: set[str] = set()
+    # Authentication screenshots/HTML can otherwise expose the phone or a
+    # one-time code. Mask the relevant controls in the live page immediately
+    # before capturing diagnostics; this happens only on a failed recovery.
+    with suppress(Exception):
+        for root in _candidate_roots(page):
+            captured_values = root.evaluate(
+                """
+                () => {
+                    const selectors = [
+                        '[data-testid="auth_pin_input"]',
+                        '[data-testid="auth_login_input"]',
+                        'input[autocomplete="one-time-code"]',
+                        'input[type="tel"]'
+                    ];
+                    const captured = [];
+                    for (const selector of selectors) {
+                        for (const element of document.querySelectorAll(selector)) {
+                            if ('value' in element && element.value) captured.push(element.value);
+                            if ('value' in element) element.value = '';
+                            element.setAttribute('value', '');
+                            element.style.setProperty('color', 'transparent', 'important');
+                            element.style.setProperty('text-shadow', 'none', 'important');
+                        }
+                    }
+                    for (const element of document.querySelectorAll(
+                        '[data-testid*="pin"], [class*="pin" i], [class*="otp" i]'
+                    )) {
+                        element.style.setProperty('color', 'transparent', 'important');
+                        element.style.setProperty('text-shadow', 'none', 'important');
+                    }
+                    return captured;
+                }
+                """
+            )
+            if isinstance(captured_values, list):
+                private_values.update(
+                    value for value in captured_values if isinstance(value, str) and value
+                )
     with suppress(Exception):
         page.screenshot(path=str(screenshot_path), full_page=True)
         screenshot_path.chmod(0o600)
     with suppress(Exception):
-        html_path.write_text(page.content(), encoding="utf-8")
+        safe_html = page.content()
+        for private_value in sorted(private_values, key=len, reverse=True):
+            safe_html = safe_html.replace(private_value, "[REDACTED]")
+        html_path.write_text(safe_html, encoding="utf-8")
         html_path.chmod(0o600)
     with suppress(Exception):
         current_url = page.url
@@ -175,6 +226,8 @@ def _save_recovery_debug(
             f"Заголовок: {title}\n"
             "Неудачные сетевые запросы:\n"
             + ("\n".join(failed_requests[-30:]) or "нет данных")
+            + "\nОтветы входа и GraphQL (без variables, cookies и SMS-кода):\n"
+            + ("\n".join((auth_responses or [])[-50:]) or "нет данных")
             + "\n",
             encoding="utf-8",
         )
@@ -183,23 +236,23 @@ def _save_recovery_debug(
 
 
 def _usable_sms_inputs(root, selector: str) -> list:
-    selectors = [
+    exact_selectors = [
         PIN_EDITABLE_SELECTOR,
         PIN_DESCENDANT_SELECTOR,
         PIN_INPUT_SELECTOR,
     ]
-    if selector not in selectors:
-        selectors.append(selector)
-    if OTP_SEMANTIC_SELECTOR not in selectors:
-        selectors.append(OTP_SEMANTIC_SELECTOR)
-    for candidate_selector in selectors:
+
+    # The current Profi.ru OTP control is the exact auth_pin_input itself, but
+    # it is intentionally transparent and has zero height. Playwright therefore
+    # reports is_visible=False even though it is attached, enabled, editable and
+    # is the element that React listens to. Exact selectors must not require
+    # visual visibility; generic fallbacks below still do.
+    for candidate_selector in exact_selectors:
         inputs = root.locator(candidate_selector)
         usable = []
         for index in range(inputs.count()):
             candidate = inputs.nth(index)
             try:
-                if not candidate.is_visible():
-                    continue
                 if (
                     hasattr(candidate, "is_enabled")
                     and not candidate.is_enabled()
@@ -209,6 +262,44 @@ def _usable_sms_inputs(root, selector: str) -> list:
                     hasattr(candidate, "is_editable")
                     and not candidate.is_editable()
                 ):
+                    continue
+            except PlaywrightError:
+                continue
+            usable.append(candidate)
+        if usable:
+            return usable
+
+    inputs = root.locator(OTP_SEMANTIC_SELECTOR)
+    usable = []
+    for index in range(inputs.count()):
+        candidate = inputs.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            if hasattr(candidate, "is_enabled") and not candidate.is_enabled():
+                continue
+            if hasattr(candidate, "is_editable") and not candidate.is_editable():
+                continue
+        except PlaywrightError:
+            continue
+        usable.append(candidate)
+    if usable:
+        return usable
+
+    # A user-defined selector is not trusted as an exact Profi control. It may
+    # be broad (for example just `input`), so require a confirmed OTP page and
+    # normal visibility/actionability before using it.
+    if selector not in exact_selectors and _root_looks_like_sms_code_page(root):
+        inputs = root.locator(selector)
+        usable = []
+        for index in range(inputs.count()):
+            candidate = inputs.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+                if hasattr(candidate, "is_enabled") and not candidate.is_enabled():
+                    continue
+                if hasattr(candidate, "is_editable") and not candidate.is_editable():
                     continue
             except PlaywrightError:
                 continue
@@ -430,11 +521,120 @@ def _wait_for_sms_code_screen(page, selector: str, timeout_ms: int):
 def _wait_for_sms_code_to_close(page, selector: str, timeout_ms: int) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
-        _raise_if_login_retry_later(page)
+        for root in _candidate_roots(page):
+            _raise_if_login_retry_later(root)
+            error_text = _find_post_otp_error_text(root)
+            if error_text:
+                raise SessionRecoveryError(
+                    f"Profi.ru отклонил завершение входа: «{error_text}»"
+                )
+        if _has_attached_exact_pin_input(page, selector):
+            time.sleep(0.25)
+            continue
         if _find_sms_code_root(page, selector) is None:
             return True
         time.sleep(0.25)
     return False
+
+
+def _successful_profile_response_seen(auth_responses: list[str]) -> bool:
+    return any(
+        "operation=BoProfileMe" in summary
+        and "HTTP 200" in summary
+        and "graphql_errors=0" in summary
+        for summary in auth_responses
+    )
+
+
+def _find_post_otp_error_text(root) -> str | None:
+    try:
+        body_text = " ".join(root.locator("body").inner_text(timeout=1_000).split())
+    except (AttributeError, PlaywrightError):
+        return None
+    for pattern in POST_OTP_ERROR_PATTERNS:
+        match = pattern.search(body_text)
+        if match:
+            start = max(0, match.start() - 40)
+            end = min(len(body_text), match.end() + 100)
+            return body_text[start:end]
+    return None
+
+
+def _has_attached_exact_pin_input(page, selector: str) -> bool:
+    selectors = [PIN_INPUT_SELECTOR]
+    for root in _candidate_roots(page):
+        for candidate_selector in selectors:
+            try:
+                if root.locator(candidate_selector).count() > 0:
+                    return True
+            except (AttributeError, PlaywrightError):
+                continue
+    return False
+
+
+def _safe_graphql_operation_names(request) -> tuple[str, ...]:
+    """Reads only operationName; variables may contain the OTP and are ignored."""
+    try:
+        payload = request.post_data_json
+    except (AttributeError, PlaywrightError, TypeError, ValueError):
+        return ()
+    items = payload if isinstance(payload, list) else [payload]
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("operationName")
+        if not isinstance(name, str) or not name:
+            query = item.get("query")
+            if isinstance(query, str):
+                match = re.search(
+                    r"\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    query,
+                )
+                if match:
+                    name = match.group(1)
+        if isinstance(name, str) and name and name not in names:
+            names.append(name[:100])
+    return tuple(names)
+
+
+def _safe_auth_response_summary(response) -> str | None:
+    request = response.request
+    operations = _safe_graphql_operation_names(request)
+    safe_url = response.url.split("?", 1)[0]
+    lowered_url = safe_url.casefold()
+    method = request.method.upper()
+    is_auth_endpoint = method not in {"GET", "HEAD"} and any(
+        marker in lowered_url
+        for marker in ("graphql", "auth", "login", "backoffice")
+    )
+    if not operations and not is_auth_endpoint:
+        return None
+    operation_text = ",".join(operations) if operations else "-"
+    graphql_error_text = ""
+    if operations:
+        # GraphQL commonly reports application errors with HTTP 200. Record
+        # only their count; messages, data and variables may contain private
+        # account information and must not be written to diagnostics.
+        try:
+            payload = response.json()
+            items = payload if isinstance(payload, list) else [payload]
+            error_count = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                errors = item.get("errors")
+                if isinstance(errors, list):
+                    error_count += len(errors)
+                elif errors:
+                    error_count += 1
+            graphql_error_text = f"; graphql_errors={error_count}"
+        except (AttributeError, PlaywrightError, ValueError):
+            graphql_error_text = "; graphql_errors=unknown"
+    return (
+        f"{method} {safe_url}: HTTP {response.status}; "
+        f"operation={operation_text}{graphql_error_text}"
+    )
 
 
 def _looks_like_login_page(page) -> bool:
@@ -466,28 +666,53 @@ def _fill_sms_code(root, selector: str, code: str) -> None:
         except (AttributeError, PlaywrightError):
             existing_parts.append("")
 
-    # A newly rendered OTP form is already empty. Avoid sending Ctrl+A and
-    # Backspace in the normal path: a user simply focuses the first cell and
-    # starts typing. Only clear a value when the site has actually left one.
-    if any(existing_parts):
-        for input_locator, existing_value in zip(
-            visible_inputs,
-            existing_parts,
-            strict=False,
+    if len(visible_inputs) >= len(code):
+        # Compatibility with classic four-cell OTP controls. Focus works for
+        # both visible and transparent controls and does not need click
+        # actionability.
+        for index, (input_locator, digit) in enumerate(
+            zip(visible_inputs, code, strict=False)
         ):
-            if not existing_value:
-                continue
-            input_locator.click()
-            input_locator.press("ControlOrMeta+A")
-            input_locator.press("Backspace")
+            input_locator.focus()
+            if existing_parts[index]:
+                input_locator.press("ControlOrMeta+A")
+                input_locator.press("Backspace")
+            input_locator.press(f"Digit{digit}")
+            if index < len(code) - 1:
+                time.sleep(OTP_KEY_DELAY_MS / 1000)
+    else:
+        first_input = visible_inputs[0]
 
-    # Playwright's keyboard typing emits keydown, keypress/input and keyup for
-    # every character. Focusing only the first field also allows the site's own
-    # OTP component to move focus between split cells, exactly as it does for a
-    # physical keyboard.
-    first_input = visible_inputs[0]
-    first_input.click()
-    first_input.press_sequentially(code, delay=OTP_KEY_DELAY_MS)
+        # This reproduces the user's working manual path. Chromium receives a
+        # trusted Ctrl+V/paste/beforeinput(inputType=insertFromPaste)/input
+        # sequence instead of a JavaScript value assignment. The OTP is kept in
+        # the isolated browser clipboard only for the duration of this action.
+        page = root if hasattr(root, "context") else root.page
+        context = page.context
+        root_url = root.url
+        parsed_url = urlsplit(root_url)
+        origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        if not parsed_url.scheme or not parsed_url.netloc:
+            raise SessionRecoveryError(
+                "Не удалось определить origin страницы SMS для безопасной вставки"
+            )
+        context.grant_permissions(CLIPBOARD_PERMISSIONS, origin=origin)
+        root.evaluate("value => navigator.clipboard.writeText(value)", code)
+        try:
+            first_input.focus()
+            if not first_input.evaluate(
+                "element => element === document.activeElement"
+            ):
+                raise SessionRecoveryError(
+                    "Скрытое поле auth_pin_input не получило фокус"
+                )
+            if existing_parts[0]:
+                first_input.press("ControlOrMeta+A")
+                first_input.press("Backspace")
+            first_input.press("Control+V")
+        finally:
+            with suppress(Exception):
+                root.evaluate("() => navigator.clipboard.writeText('')")
 
     try:
         actual_parts = []
@@ -567,6 +792,7 @@ def recreate_profi_session(
         page = session.page
         phase = "открытие страницы входа"
         failed_requests: list[str] = []
+        auth_responses: list[str] = []
 
         def record_failed_request(request) -> None:
             if len(failed_requests) >= 100:
@@ -577,7 +803,24 @@ def recreate_profi_session(
             )
 
         with suppress(Exception):
-            page.on("requestfailed", record_failed_request)
+            context.on("requestfailed", record_failed_request)
+
+        def record_finished_auth_request(request) -> None:
+            if len(auth_responses) >= 200:
+                return
+            with suppress(Exception):
+                response = request.response()
+                if response is None:
+                    return
+                summary = _safe_auth_response_summary(response)
+                if summary:
+                    auth_responses.append(summary)
+
+        with suppress(Exception):
+            # BrowserContext sees requests from the main page, popup windows
+            # and iframes. requestfinished runs after the body is available, so
+            # GraphQL error counts can be read without delaying authentication.
+            context.on("requestfinished", record_finished_auth_request)
 
         try:
             page.goto(
@@ -702,12 +945,19 @@ def recreate_profi_session(
                 )
                 time.sleep(1)
 
-            # Отсутствие карточек может означать, что сейчас просто нет заказов.
-            # Ошибкой считаем возврат формы входа, а не пустую доску заказов.
-            if not cards_found and _looks_like_login_page(page):
-                raise SessionRecoveryError(
-                    "После SMS-кода Profi.ru снова показал страницу входа"
-                )
+            # A board may contain no order cards, so BoProfileMe is the positive
+            # authentication signal in that case. Never save state merely
+            # because the OTP field disappeared.
+            if not cards_found:
+                if _looks_like_login_page(page):
+                    raise SessionRecoveryError(
+                        "После SMS-кода Profi.ru снова показал страницу входа"
+                    )
+                if not _successful_profile_response_seen(auth_responses):
+                    raise SessionRecoveryError(
+                        "После SMS-кода сайт не подтвердил авторизацию: "
+                        "нет успешного ответа BoProfileMe и не открыта доска заказов"
+                    )
 
             context.storage_state(
                 path=str(temporary_state),
@@ -722,6 +972,7 @@ def recreate_profi_session(
                 phase=phase,
                 error=exc,
                 failed_requests=failed_requests,
+                auth_responses=auth_responses,
             )
             if isinstance(exc, LoginRetryLaterError):
                 raise LoginRetryLaterError(
@@ -941,7 +1192,11 @@ class SessionRecoveryManager:
                 return
             except SessionRecoveryError as exc:
                 self.log.error("Не удалось обновить сессию Profi.ru: %s", exc)
-                if exc.screenshot_path is not None and exc.screenshot_path.exists():
+                if (
+                    not self.audience.open_mode
+                    and exc.screenshot_path is not None
+                    and exc.screenshot_path.exists()
+                ):
                     try:
                         await self.audience.send_photo(
                             self.bot,
@@ -953,6 +1208,11 @@ class SessionRecoveryManager:
                         self.log.exception(
                             "Не удалось отправить диагностический скриншот в Telegram"
                         )
+                elif self.audience.open_mode and exc.screenshot_path is not None:
+                    self.log.warning(
+                        "Диагностический скриншот входа не отправлен: "
+                        "ADMIN_CHAT_ID не задан, бот работает в открытом режиме"
+                    )
                 if isinstance(exc, LoginRetryLaterError):
                     activate_site_cooldown(
                         self.settings.site_cooldown_path,

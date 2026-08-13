@@ -11,9 +11,11 @@ from session_recovery import (
     SessionRecoveryManager,
     _fill_login_input,
     _fill_sms_code,
+    _find_post_otp_error_text,
     _find_sms_code_root,
     _find_sms_code_screen,
     _find_login_retry_later_text,
+    _safe_auth_response_summary,
     OTP_VISIBLE_INPUT_FALLBACK_SELECTOR,
     normalize_sms_code,
     recreate_profi_session,
@@ -39,11 +41,21 @@ class FakeLog:
         pass
 
 
-class FakeInput:
+class FakeContext:
     def __init__(self):
+        self.permissions = []
+
+    def grant_permissions(self, permissions, origin=None):
+        self.permissions.append((tuple(permissions), origin))
+
+
+class FakeInput:
+    def __init__(self, page=None):
+        self.page = page
         self.value = ""
         self.pressed = []
         self.clicks = 0
+        self.focuses = 0
 
     def is_visible(self):
         return True
@@ -57,13 +69,28 @@ class FakeInput:
     def click(self):
         self.clicks += 1
 
+    def focus(self):
+        self.focuses += 1
+        if self.page is not None:
+            self.page.active_element = self
+
+    def evaluate(self, expression):
+        if "document.activeElement" in expression:
+            return self.page is not None and self.page.active_element is self
+        raise AssertionError(f"Неожиданный evaluate: {expression}")
+
     def press(self, key):
         self.pressed.append(key)
+        if key in {"Control+V", "Meta+V"}:
+            if self.page is not None:
+                self.value = self.page.clipboard
+            return
         if key == "Backspace":
             self.value = ""
             return
-        if key.isdigit():
-            self.value += key
+        digit = key.removeprefix("Digit")
+        if digit.isdigit() and len(digit) == 1:
+            self.value += digit
 
     def press_sequentially(self, value, delay=0):
         self.pressed.append(("sequential", value, delay))
@@ -71,8 +98,8 @@ class FakeInput:
 
 
 class FakeInputs:
-    def __init__(self, count):
-        self.items = [FakeInput() for _ in range(count)]
+    def __init__(self, count, page=None):
+        self.items = [FakeInput(page) for _ in range(count)]
 
     def count(self):
         return len(self.items)
@@ -88,15 +115,109 @@ class FakeInputsWithItems(FakeInputs):
 
 class FakePage:
     def __init__(self, input_count):
-        self.inputs = FakeInputs(input_count)
+        self.context = FakeContext()
+        self.url = "https://profi.ru/backoffice/"
+        self.clipboard = ""
+        self.active_element = None
+        self.inputs = FakeInputs(input_count, self)
         self.seen_selectors = []
 
     def locator(self, selector):
         self.seen_selectors.append(selector)
         return self.inputs
 
+    def evaluate(self, expression, value=None):
+        if "writeText(value)" in expression:
+            self.clipboard = value
+            return None
+        if "writeText('')" in expression:
+            self.clipboard = ""
+            return None
+        raise AssertionError(f"Неожиданный evaluate: {expression}")
+
 
 class RecoveryTests(unittest.TestCase):
+    def test_auth_response_diagnostics_never_include_otp_or_graphql_data(self):
+        class Request:
+            method = "POST"
+            post_data_json = {
+                "operationName": "BoProfileMe",
+                "variables": {"pin": "1234"},
+            }
+
+        class Response:
+            request = Request()
+            url = "https://profi.ru/graphql?token=private"
+            status = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "errors": [{"message": "private profile error"}],
+                    "data": {"me": {"phone": "+70000000000"}},
+                }
+
+        summary = _safe_auth_response_summary(Response())
+
+        self.assertIn("BoProfileMe", summary)
+        self.assertIn("HTTP 200", summary)
+        self.assertIn("graphql_errors=1", summary)
+        self.assertNotIn("1234", summary)
+        self.assertNotIn("private", summary)
+        self.assertNotIn("+70000000000", summary)
+
+    def test_post_otp_error_text_is_detected(self):
+        class Body:
+            @staticmethod
+            def inner_text(timeout):
+                return "Введите код из СМС\nЧто-то пошло не так. Попробуйте повторить попытку позже."
+
+        class Root:
+            @staticmethod
+            def locator(selector):
+                self = Root()
+                self.inner_text = Body.inner_text
+                return self
+
+        text = _find_post_otp_error_text(Root())
+
+        self.assertIn("Что-то пошло не так", text)
+
+    def test_static_backoffice_resources_are_not_written_to_auth_diagnostics(self):
+        class Request:
+            method = "GET"
+            post_data_json = None
+
+        class Response:
+            request = Request()
+            url = "https://profi.ru/backoffice/build/auth.js"
+            status = 200
+
+        self.assertIsNone(_safe_auth_response_summary(Response()))
+
+    def test_graphql_operation_is_read_from_query_without_logging_variables(self):
+        class Request:
+            method = "POST"
+            post_data_json = {
+                "query": "query BoProfileMe { me { profile { type } } }",
+                "variables": {"pin": "8796"},
+            }
+
+        class Response:
+            request = Request()
+            url = "https://profi.ru/graphql"
+            status = 200
+
+            @staticmethod
+            def json():
+                return {"data": {"me": None}}
+
+        summary = _safe_auth_response_summary(Response())
+
+        self.assertIn("operation=BoProfileMe", summary)
+        self.assertIn("graphql_errors=0", summary)
+        self.assertNotIn("8796", summary)
+
     def test_phone_uses_original_direct_fill_method(self):
         events = []
 
@@ -186,11 +307,8 @@ class RecoveryTests(unittest.TestCase):
 
             def press(self, key):
                 events.append(("press", key))
-                if self.kind == "otp" and key == "Backspace":
-                    self.value = ""
-                    return
-                if self.kind == "otp" and key.isdigit():
-                    self.value += key
+                if self.kind == "otp" and key == "Control+V":
+                    self.value = self.page.clipboard
                     if len(self.value) == 4:
                         self.page.otp_closed = True
 
@@ -203,6 +321,15 @@ class RecoveryTests(unittest.TestCase):
 
             def type(self, value, delay=0):
                 events.append(("type", value, delay))
+
+            def focus(self):
+                events.append("otp_focus")
+                self.page.active_element = self
+
+            def evaluate(self, expression):
+                if "document.activeElement" in expression:
+                    return self.page.active_element is self
+                raise AssertionError(expression)
 
         class Inputs:
             def __init__(self, element=None):
@@ -220,6 +347,10 @@ class RecoveryTests(unittest.TestCase):
                 self.button_text_reads = 0
                 self.method_selected = False
                 self.otp_closed = False
+                self.active_element = None
+                self.clipboard = ""
+                self.context = None
+                self.url = "https://profi.ru/backoffice/"
 
             def goto(self, *args, **kwargs):
                 events.append("goto")
@@ -243,7 +374,18 @@ class RecoveryTests(unittest.TestCase):
                     return Inputs(Element(self, "sms_method"))
                 if "auth_pin_input" in selector or selector == "otp-selector":
                     events.append("otp_lookup")
+                if self.otp_closed:
+                    return EmptyInputs()
                 return Inputs(Element(self, "otp"))
+
+            def evaluate(self, expression, value=None):
+                if "writeText(value)" in expression:
+                    self.clipboard = value
+                    return None
+                if "writeText('')" in expression:
+                    self.clipboard = ""
+                    return None
+                raise AssertionError(expression)
 
         class EmptyInputs:
             def count(self):
@@ -260,7 +402,12 @@ class RecoveryTests(unittest.TestCase):
                 self.init_script = kwargs["script"]
 
             def new_page(self):
-                return Page()
+                page = Page()
+                page.context = self
+                return page
+
+            def grant_permissions(self, permissions, origin=None):
+                events.append(("permissions", tuple(permissions), origin))
 
             def storage_state(self, path, **kwargs):
                 self.storage_state_options = kwargs
@@ -346,7 +493,7 @@ class RecoveryTests(unittest.TestCase):
         ]
         self.assertTrue(otp_interactions)
         self.assertGreater(min(otp_interactions), events.index("code"))
-        typing_event = ("press_sequentially", "8796", 160)
+        typing_event = ("press", "Control+V")
         self.assertLess(events.index("code"), events.index(typing_event))
         self.assertEqual(events.count(typing_event), 1)
         self.assertNotIn(("press", "1"), events)
@@ -443,11 +590,12 @@ class RecoveryTests(unittest.TestCase):
             )
             manager = SessionRecoveryManager(settings, FakeBot(), FakeLog())
 
-            accepted, _ = await manager.submit_code("1234")
-            self.assertFalse(accepted)
+            with patch("session_recovery.load_site_cooldown", return_value=None):
+                accepted, _ = await manager.submit_code("1234")
+                self.assertFalse(accepted)
 
-            manager.awaiting_code = True
-            accepted, message = await manager.submit_code("1234")
+                manager.awaiting_code = True
+                accepted, message = await manager.submit_code("1234")
             self.assertTrue(accepted)
             self.assertIn("Код получен", message)
 
@@ -466,7 +614,8 @@ class RecoveryTests(unittest.TestCase):
             manager = SessionRecoveryManager(settings, FakeBot(), FakeLog())
             manager.awaiting_code = True
 
-            accepted, message = await manager.submit_code("не код")
+            with patch("session_recovery.load_site_cooldown", return_value=None):
+                accepted, message = await manager.submit_code("не код")
 
             self.assertFalse(accepted)
             self.assertTrue(manager.awaiting_code)
@@ -488,7 +637,8 @@ class RecoveryTests(unittest.TestCase):
             manager = SessionRecoveryManager(settings, bot, FakeLog())
             manager._task = asyncio.create_task(asyncio.sleep(10))
             try:
-                accepted, message = await manager.submit_code("8796")
+                with patch("session_recovery.load_site_cooldown", return_value=None):
+                    accepted, message = await manager.submit_code("8796")
 
                 self.assertFalse(accepted)
                 self.assertFalse(manager.awaiting_code)
@@ -540,21 +690,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(page.inputs.items[0].value, "1234")
         self.assertEqual(
             page.inputs.items[0].pressed,
-            [("sequential", "1234", 160)],
+            ["Control+V"],
         )
-        self.assertEqual(page.inputs.items[0].clicks, 1)
+        self.assertEqual(page.inputs.items[0].clicks, 0)
+        self.assertEqual(page.inputs.items[0].focuses, 1)
+        self.assertEqual(page.clipboard, "")
+        self.assertEqual(
+            page.context.permissions,
+            [(('clipboard-read', 'clipboard-write'), 'https://profi.ru')],
+        )
         self.assertIn("auth_pin_input", page.seen_selectors[0])
 
     def test_sms_code_is_entered_into_four_separate_inputs(self):
         page = FakePage(input_count=4)
-        first_input = page.inputs.items[0]
-
-        def distribute_like_otp_component(value, delay=0):
-            first_input.pressed.append(("sequential", value, delay))
-            for target, digit in zip(page.inputs.items, value, strict=False):
-                target.value = digit
-
-        first_input.press_sequentially = distribute_like_otp_component
 
         _fill_sms_code(page, "unused", "1234")
 
@@ -563,14 +711,28 @@ class RecoveryTests(unittest.TestCase):
             ["1", "2", "3", "4"],
         )
         self.assertEqual(
-            first_input.pressed,
-            [("sequential", "1234", 160)],
+            [item.pressed[-1] for item in page.inputs.items],
+            ["Digit1", "Digit2", "Digit3", "Digit4"],
         )
-        self.assertEqual(first_input.clicks, 1)
-        self.assertTrue(all(item.clicks == 0 for item in page.inputs.items[1:]))
+        self.assertTrue(all(item.clicks == 0 for item in page.inputs.items))
+        self.assertTrue(all(item.focuses == 1 for item in page.inputs.items))
+
+    def test_stale_values_in_four_sms_inputs_are_replaced(self):
+        page = FakePage(input_count=4)
+        for item in page.inputs.items:
+            item.value = "9"
+
+        _fill_sms_code(page, "unused", "1234")
+
+        self.assertEqual([item.value for item in page.inputs.items], ["1", "2", "3", "4"])
+        self.assertEqual(
+            page.inputs.items[0].pressed,
+            ["ControlOrMeta+A", "Backspace", "Digit1"],
+        )
 
     def test_unmarked_single_otp_input_is_found_and_typed_digit_by_digit(self):
-        target = FakeInput()
+        page = FakePage(input_count=0)
+        target = FakeInput(page)
 
         class EmptyInputs:
             def count(self):
@@ -580,12 +742,18 @@ class RecoveryTests(unittest.TestCase):
                 raise IndexError(index)
 
         class Root:
+            context = page.context
+            url = page.url
+
             def locator(self, selector):
                 if selector == OTP_VISIBLE_INPUT_FALLBACK_SELECTOR:
                     return FakeInputsWithItems([target])
                 if selector == "body":
                     return Body()
                 return EmptyInputs()
+
+            def evaluate(self, expression, value=None):
+                return page.evaluate(expression, value)
 
         class Body:
             def inner_text(self, timeout):
@@ -594,7 +762,7 @@ class RecoveryTests(unittest.TestCase):
         _fill_sms_code(Root(), "unused", "4821")
 
         self.assertEqual(target.value, "4821")
-        self.assertEqual(target.pressed, [("sequential", "4821", 160)])
+        self.assertEqual(target.pressed, ["Control+V"])
 
     def test_intermediate_page_input_is_not_treated_as_sms_field(self):
         target = FakeInput()
@@ -649,18 +817,19 @@ class RecoveryTests(unittest.TestCase):
 
     def test_sms_fill_reports_when_field_rejects_value(self):
         class RejectingInput(FakeInput):
-            def press_sequentially(self, value, delay=0):
-                self.pressed.append(("sequential", value, delay))
+            def press(self, key):
+                self.pressed.append(key)
                 return None
 
         page = FakePage(input_count=1)
-        page.inputs.items[0] = RejectingInput()
+        page.inputs.items[0] = RejectingInput(page)
 
         with self.assertRaisesRegex(Exception, "не принял"):
             _fill_sms_code(page, "unused", "1234")
 
     def test_sms_input_can_be_nested_inside_exact_test_id_wrapper(self):
-        target = FakeInput()
+        page = FakePage(input_count=0)
+        target = FakeInput(page)
 
         class Wrapper(FakeInput):
             def is_editable(self):
@@ -674,6 +843,9 @@ class RecoveryTests(unittest.TestCase):
                 raise IndexError(index)
 
         class Root:
+            context = page.context
+            url = page.url
+
             def locator(self, selector):
                 if selector.startswith('input[data-testid="auth_pin_input"]'):
                     return EmptyInputs()
@@ -682,6 +854,9 @@ class RecoveryTests(unittest.TestCase):
                 if selector == '[data-testid="auth_pin_input"]':
                     return FakeInputsWithItems([Wrapper()])
                 return EmptyInputs()
+
+            def evaluate(self, expression, value=None):
+                return page.evaluate(expression, value)
 
         _fill_sms_code(Root(), "unused", "1234")
 
