@@ -123,7 +123,7 @@ class AppTests(unittest.TestCase):
 
         with redirect_stdout(output):
             exit_code = command_filter(
-                "Нужно разработать бота для таргетинга, бюджет 50 000 рублей"
+                "Нужно разработать Telegram-бота для таргетинга, бюджет 50 000 рублей"
             )
 
         self.assertEqual(exit_code, 0)

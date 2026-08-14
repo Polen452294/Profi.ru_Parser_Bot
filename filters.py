@@ -5,19 +5,25 @@ from typing import Any
 import re
 
 
-TARGET_KEYWORD_PATTERNS = (
-    re.compile(r"(?iu)\bбот\b"),
-    re.compile(r"(?iu)\bбота\b"),
-    re.compile(r"(?iu)\bботы\b"),
-    re.compile(r"(?iu)\bботов\b"),
-    re.compile(r"(?iu)\bботом\b"),
-    re.compile(r"(?iu)\bботу\b"),
-    re.compile(r"(?iu)\bчат[- ]?бот\b"),
-    re.compile(r"(?iu)\bчат[- ]?бота\b"),
-    re.compile(r"(?iu)\bchat[- ]?bot\b"),
-    re.compile(r"(?iu)\bbot\b"),
-    re.compile(r"(?iu)\bbots\b"),
+TELEGRAM_BOT_PATTERNS = (
+    re.compile(
+        r"(?iu)(?:"
+        r"\b(?:телеграм\w*|telegram|тг)\b.*?\b(?:бот\w*|bots?)\b|"
+        r"\b(?:бот\w*|bots?)\b.*?\b(?:телеграм\w*|telegram|тг)\b"
+        r")"
+    ),
+)
 
+MAX_BOT_PATTERNS = (
+    re.compile(
+        r"(?iu)(?:"
+        r"\b(?:макс|max)\b.*?\b(?:бот\w*|bots?)\b|"
+        r"\b(?:бот\w*|bots?)\b.*?\b(?:макс|max)\b"
+        r")"
+    ),
+)
+
+CRM_PATTERNS = (
     re.compile(r"(?iu)\bcrm\b"),
     re.compile(r"(?iu)\bcrm[- ]?систем\w*\b"),
     re.compile(r"(?iu)\bцрм\b"),
@@ -25,24 +31,33 @@ TARGET_KEYWORD_PATTERNS = (
     re.compile(r"(?iu)\bсрм\b"),
     re.compile(r"(?iu)\bсрм[- ]?систем\w*\b"),
     re.compile(r"(?iu)\bси[- ]?ар[- ]?эм\b"),
+)
 
+PARSER_PATTERNS = (
     re.compile(r"(?iu)\bпарсер\w*\b"),
     re.compile(r"(?iu)\bпарсинг\w*\b"),
-    re.compile(r"(?iu)\bпарсить\b"),
     re.compile(r"(?iu)\bпарсить\w*\b"),
     re.compile(r"(?iu)\bспарс\w*\b"),
     re.compile(r"(?iu)\bраспарс\w*\b"),
     re.compile(r"(?iu)\bparser\w*\b"),
     re.compile(r"(?iu)\bparsing\b"),
     re.compile(r"(?iu)\bparse\b"),
-
-    re.compile(r"(?iu)\bавтоматизац\w*\b"),
-    re.compile(r"(?iu)\bавтоматизир\w*\b"),
-    re.compile(r"(?iu)\bавтоматическ\w*\b"),
-    re.compile(r"(?iu)\bautomation\b"),
-    re.compile(r"(?iu)\bautomate\b"),
-    re.compile(r"(?iu)\bautomated\b"),
 )
+
+TARGET_PATTERN_GROUPS = (
+    ("Telegram-боты", TELEGRAM_BOT_PATTERNS),
+    ("MAX-боты", MAX_BOT_PATTERNS),
+    ("Парсеры и парсинг", PARSER_PATTERNS),
+    ("Разработка CRM", CRM_PATTERNS),
+)
+
+TARGET_KEYWORD_PATTERNS = tuple(
+    pattern
+    for _group, patterns in TARGET_PATTERN_GROUPS
+    for pattern in patterns
+)
+
+MIN_BUDGET_RUB = 5_000
 
 DEV_KEYWORDS = (
     "разработка",
@@ -127,9 +142,16 @@ def _to_text(data: Any) -> str:
         ):
             value = data.get(key)
             if isinstance(value, str) and value.strip():
-                parts.append(value.strip())
+                normalized_value = value.strip()
+                if key in {"budget", "price", "amount"}:
+                    parts.append(f"{key}: {normalized_value}")
+                else:
+                    parts.append(normalized_value)
             elif isinstance(value, (int, float)):
-                parts.append(str(value))
+                if key in {"budget", "price", "amount"}:
+                    parts.append(f"{key}: {value}")
+                else:
+                    parts.append(str(value))
 
         if not parts:
             for value in data.values():
@@ -151,11 +173,13 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _contains_target_keyword(text: str) -> bool:
-    for rx in TARGET_KEYWORD_PATTERNS:
-        if rx.search(text):
-            return True
-    return False
+def _find_target_match(text: str) -> tuple[re.Match[str], str] | None:
+    for group, patterns in TARGET_PATTERN_GROUPS:
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match is not None:
+                return match, group
+    return None
 
 
 def _contains_dev_intent(text: str) -> bool:
@@ -199,7 +223,7 @@ def _budget_matches(text: str) -> bool:
     budget = _extract_budget_value(text)
     if budget is None:
         return True
-    return budget >= 10000
+    return budget >= MIN_BUDGET_RUB
 
 
 def order_matches_filter(data: Any) -> bool:
@@ -208,7 +232,7 @@ def order_matches_filter(data: Any) -> bool:
     if not text:
         return False
 
-    if not _contains_target_keyword(text):
+    if _find_target_match(text) is None:
         return False
 
     if not _contains_dev_intent(text):
@@ -245,14 +269,12 @@ def evaluate_order(data: Any) -> FilterDecision:
     if not text:
         return FilterDecision(accepted=False)
 
-    target_match = next(
-        (match for pattern in TARGET_KEYWORD_PATTERNS if (match := pattern.search(text))),
-        None,
-    )
-    if target_match is None:
+    target = _find_target_match(text)
+    if target is None:
         return FilterDecision(accepted=False)
 
-    matched_rule = FilterRule(target_match.group(0), "Целевая тематика")
+    target_match, target_group = target
+    matched_rule = FilterRule(target_match.group(0), target_group)
     if not _contains_dev_intent(text):
         return FilterDecision(
             accepted=False,
@@ -296,7 +318,10 @@ def evaluate_order(data: Any) -> FilterDecision:
         return FilterDecision(
             accepted=False,
             matched_rule=matched_rule,
-            excluded_rule=FilterRule("бюджет ниже 10 000 ₽", "Бюджет"),
+            excluded_rule=FilterRule(
+                f"цена ниже {MIN_BUDGET_RUB:,} руб.".replace(",", " "),
+                "Бюджет",
+            ),
         )
 
     return FilterDecision(accepted=True, matched_rule=matched_rule)
