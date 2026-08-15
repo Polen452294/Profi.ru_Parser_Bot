@@ -134,6 +134,30 @@ def _page_looks_logged_out(client: ProfiClient) -> bool:
     return "вход" in title or "login" in title or "login" in url
 
 
+def _capture_browser_screenshot(
+    client: ProfiClient | None,
+    prefix: str,
+) -> str | None:
+    if client is None:
+        return None
+    screenshot_path, _, _ = client.save_debug(prefix)
+    return str(screenshot_path) if screenshot_path.exists() else None
+
+
+def _record_browser_failure(
+    health: SiteHealthReporter,
+    client: ProfiClient | None,
+    message: str,
+    prefix: str,
+) -> None:
+    screenshot = (
+        _capture_browser_screenshot(client, prefix)
+        if health.will_alert_on_next_failure
+        else None
+    )
+    health.record_failure(message, screenshot)
+
+
 def _collect_matching_orders(
     client: ProfiClient,
     seen_ids: set[str],
@@ -251,12 +275,21 @@ def run_parser(settings: Settings) -> None:
                             )
                         if _page_looks_logged_out(client):
                             message = "Сессия Profi.ru завершена или сайт запросил вход"
-                            health.session_expired(message)
+                            screenshot = _capture_browser_screenshot(
+                                client,
+                                "session_expired",
+                            )
+                            health.session_expired(message, screenshot)
                             heartbeat.mark_failure(message)
                             raise SessionExpiredError(message)
 
                         message = "Profi.ru не показывает карточки заказов"
-                        health.record_failure(message)
+                        _record_browser_failure(
+                            health,
+                            client,
+                            message,
+                            "site_error",
+                        )
                         heartbeat.mark_failure(message)
                         logger.warning(
                             "Карточки не найдены; уменьшаю частоту запросов"
@@ -292,7 +325,11 @@ def run_parser(settings: Settings) -> None:
                 except SiteResponseError as exc:
                     if exc.status == 401:
                         message = "Profi.ru отклонил завершившуюся сессию (HTTP 401)"
-                        health.session_expired(message)
+                        screenshot = _capture_browser_screenshot(
+                            client,
+                            "session_expired_401",
+                        )
+                        health.session_expired(message, screenshot)
                         heartbeat.mark_failure(message)
                         raise SessionExpiredError(message) from exc
                     if exc.status == 403:
@@ -305,9 +342,13 @@ def run_parser(settings: Settings) -> None:
                         heartbeat.mark_paused(message)
                         raise AccessChallengeError(message) from exc
                     message = f"Profi.ru ограничил запросы: HTTP {exc.status}"
-                    health.record_failure(message)
+                    _record_browser_failure(
+                        health,
+                        client,
+                        message,
+                        f"http_{exc.status}",
+                    )
                     heartbeat.mark_failure(message)
-                    client.save_debug(f"http_{exc.status}")
                     _sleep_after_failure(
                         settings,
                         health.consecutive_errors,
@@ -315,8 +356,14 @@ def run_parser(settings: Settings) -> None:
                     )
                     continue
                 except BrowserUnavailableError as exc:
-                    health.record_failure(f"Ошибка браузера: {exc}")
-                    heartbeat.mark_failure(f"Ошибка браузера: {exc}")
+                    message = f"Ошибка браузера: {exc}"
+                    _record_browser_failure(
+                        health,
+                        client,
+                        message,
+                        "browser_error",
+                    )
+                    heartbeat.mark_failure(message)
                     _sleep_after_failure(settings, health.consecutive_errors)
                     client = _restart_client(
                         client,
@@ -327,8 +374,14 @@ def run_parser(settings: Settings) -> None:
                     )
                     continue
                 except Exception as exc:
-                    health.record_failure(f"Ошибка получения заказов: {exc}")
-                    heartbeat.mark_failure(f"Ошибка получения заказов: {exc}")
+                    message = f"Ошибка получения заказов: {exc}"
+                    _record_browser_failure(
+                        health,
+                        client,
+                        message,
+                        "orders_error",
+                    )
+                    heartbeat.mark_failure(message)
                     logger.exception("Ошибка цикла мониторинга; браузер будет перезапущен")
                     _sleep_after_failure(settings, health.consecutive_errors)
                     client = _restart_client(

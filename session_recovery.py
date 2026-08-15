@@ -1032,6 +1032,22 @@ class SessionRecoveryManager:
     async def _send(self, text: str) -> int:
         return await self.audience.send(self.bot, text)
 
+    async def _send_error(self, text: str) -> int:
+        return await self.audience.send_error(self.bot, text)
+
+    async def _send_recovery_error(
+        self,
+        text: str,
+        screenshot_path: Path | None,
+    ) -> int:
+        if screenshot_path is not None and screenshot_path.exists():
+            return await self.audience.send_error_photo(
+                self.bot,
+                str(screenshot_path),
+                text,
+            )
+        return await self._send_error(text)
+
     async def _send_required(self, text: str) -> None:
         """Не продолжает вход, пока Telegram недоступен пользователю."""
         while True:
@@ -1122,7 +1138,7 @@ class SessionRecoveryManager:
             time.localtime(cooldown.until_timestamp),
         )
         if announce:
-            await self._send_required(
+            await self._send_error(
                 "⏸ Profi.ru сообщил о слишком большом количестве попыток входа.\n\n"
                 "Новые клики, запросы SMS и обращения парсера к сайту остановлены. "
                 f"Осталось: {format_remaining_time(remaining)}.\n"
@@ -1141,7 +1157,7 @@ class SessionRecoveryManager:
         except asyncio.TimeoutError:
             clear_site_cooldown(self.settings.site_cooldown_path)
             self._clear_code_queue()
-            await self._send(
+            await self._send_error(
                 "▶️ 12-часовая пауза завершена. Автоматически повторяю вход в Profi.ru."
             )
             return True
@@ -1192,27 +1208,6 @@ class SessionRecoveryManager:
                 return
             except SessionRecoveryError as exc:
                 self.log.error("Не удалось обновить сессию Profi.ru: %s", exc)
-                if (
-                    not self.audience.open_mode
-                    and exc.screenshot_path is not None
-                    and exc.screenshot_path.exists()
-                ):
-                    try:
-                        await self.audience.send_photo(
-                            self.bot,
-                            str(exc.screenshot_path),
-                            "Диагностика неудачного входа в Profi.ru. "
-                            "На изображении видно состояние страницы в момент ошибки.",
-                        )
-                    except Exception:
-                        self.log.exception(
-                            "Не удалось отправить диагностический скриншот в Telegram"
-                        )
-                elif self.audience.open_mode and exc.screenshot_path is not None:
-                    self.log.warning(
-                        "Диагностический скриншот входа не отправлен: "
-                        "ADMIN_CHAT_ID не задан, бот работает в открытом режиме"
-                    )
                 if isinstance(exc, LoginRetryLaterError):
                     activate_site_cooldown(
                         self.settings.site_cooldown_path,
@@ -1221,25 +1216,27 @@ class SessionRecoveryManager:
                     self.awaiting_code = False
                     self._clear_code_queue()
                     reason = "завершилась обязательная 12-часовая пауза"
-                    await self._send(
+                    await self._send_recovery_error(
                         "⏳ Profi.ru временно ограничил повторный вход на 12 часов.\n"
                         f"Сообщение сайта: {exc}\n\n"
                         "Бот не будет нажимать кнопки, запрашивать SMS или обращаться "
                         "к сайту до окончания срока. После паузы работа продолжится "
-                        "автоматически."
+                        "автоматически.",
+                        exc.screenshot_path,
                     )
                     cooldown_announced = True
                     continue
-                await self._send(
+                await self._send_recovery_error(
                     "❌ Не удалось обновить сессию Profi.ru.\n"
                     f"Причина: {exc}\n\n"
                     "Подробности сохранены в logs/debug/session_recovery_failed.txt и .html. "
-                    "Исправьте настройки при необходимости и отправьте /renew для повтора."
+                    "Исправьте настройки при необходимости и отправьте /renew для повтора.",
+                    exc.screenshot_path,
                 )
                 return
             except Exception:
                 self.log.exception("Непредвиденная ошибка восстановления сессии")
-                await self._send(
+                await self._send_error(
                     "❌ Внутренняя ошибка восстановления сессии. "
                     "Отправьте /renew для повторной попытки."
                 )

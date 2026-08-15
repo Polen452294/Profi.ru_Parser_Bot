@@ -33,7 +33,6 @@ from storage import (
     save_cursor,
 )
 from telegram_control import (
-    notify_admin,
     system_event_notifier,
     telegram_command_polling,
 )
@@ -67,6 +66,33 @@ def parser_pid() -> int | None:
     if process is None or process.returncode is not None:
         return None
     return process.pid
+
+
+def _latest_debug_screenshot(
+    settings: Settings,
+    *,
+    since: float,
+) -> Path | None:
+    screenshots = [
+        path
+        for path in settings.debug_dir.glob("*.png")
+        if path.is_file() and path.stat().st_mtime >= since - 1
+    ]
+    return max(screenshots, key=lambda path: path.stat().st_mtime) if screenshots else None
+
+
+async def _send_error_with_screenshot(
+    settings: Settings,
+    bot: Bot,
+    audience: TelegramAudience,
+    text: str,
+    *,
+    since: float,
+) -> int:
+    screenshot = _latest_debug_screenshot(settings, since=since)
+    if screenshot is not None:
+        return await audience.send_error_photo(bot, str(screenshot), text)
+    return await audience.send_error(bot, text)
 
 
 async def start_parser_process(settings: Settings, log) -> Process:
@@ -146,13 +172,13 @@ async def wait_for_active_site_cooldown(
         else None
     )
     if screenshot is not None:
-        await audience.send_photo(bot, str(screenshot), caption)
+        await audience.send_error_photo(bot, str(screenshot), caption)
     else:
-        await audience.send(bot, caption)
+        await audience.send_error(bot, caption)
 
     await control.wait_for_resume()
     clear_site_cooldown(settings.site_cooldown_path)
-    await audience.send(
+    await audience.send_error(
         bot,
         "▶️ 12-часовая пауза завершена. Автоматически возобновляю работу парсера.",
     )
@@ -315,11 +341,11 @@ async def supervise_parser(
                     "/resume, когда можно безопасно повторить проверку."
                 )
                 if screenshot is not None:
-                    await audience.send_photo(bot, str(screenshot), caption)
+                    await audience.send_error_photo(bot, str(screenshot), caption)
                 else:
-                    await audience.send(bot, caption)
+                    await audience.send_error(bot, caption)
                 await control.wait_for_resume()
-                await audience.send(
+                await audience.send_error(
                     bot,
                     "▶️ Получена команда /resume. Возобновляю проверку Profi.ru.",
                 )
@@ -335,20 +361,22 @@ async def supervise_parser(
 
             if restart_count >= settings.site_error_threshold and not crash_alert_sent:
                 crash_alert_sent = True
-                await notify_admin(
-                    bot,
+                await _send_error_with_screenshot(
                     settings,
+                    bot,
+                    audience,
                     "🚨 Парсер несколько раз завершился с ошибкой. "
                     "Автоматические перезапуски продолжаются. Проверьте logs/run_all.error.log.",
-                    audience,
+                    since=parser_started_at,
                 )
 
             if restart_count > settings.max_restarts:
-                await notify_admin(
-                    bot,
+                await _send_error_with_screenshot(
                     settings,
-                    "❌ Парсер остановлен: достигнут лимит автоматических перезапусков.",
+                    bot,
                     audience,
+                    "❌ Парсер остановлен: достигнут лимит автоматических перезапусков.",
+                    since=parser_started_at,
                 )
                 return
 

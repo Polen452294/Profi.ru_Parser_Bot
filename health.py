@@ -43,7 +43,18 @@ class SiteHealthReporter:
     def parser_started(self) -> None:
         emit_system_event(self.path, EVENT_PARSER_STARTED, "Парсер запущен")
 
-    def record_failure(self, message: str) -> None:
+    @property
+    def will_alert_on_next_failure(self) -> bool:
+        return (
+            not self.alert_sent
+            and self.consecutive_errors + 1 >= self.error_threshold
+        )
+
+    def record_failure(
+        self,
+        message: str,
+        screenshot_path: str | None = None,
+    ) -> None:
         self.consecutive_errors += 1
         if self.consecutive_errors < self.error_threshold or self.alert_sent:
             return
@@ -54,6 +65,7 @@ class SiteHealthReporter:
             EVENT_SITE_ERROR,
             message,
             consecutive_errors=self.consecutive_errors,
+            screenshot_path=screenshot_path,
         )
 
     def record_success(self) -> None:
@@ -67,8 +79,17 @@ class SiteHealthReporter:
                 "Profi.ru снова корректно показывает карточки заказов",
             )
 
-    def session_expired(self, message: str) -> None:
-        emit_system_event(self.path, EVENT_SESSION_EXPIRED, message)
+    def session_expired(
+        self,
+        message: str,
+        screenshot_path: str | None = None,
+    ) -> None:
+        emit_system_event(
+            self.path,
+            EVENT_SESSION_EXPIRED,
+            message,
+            screenshot_path=screenshot_path,
+        )
 
     def access_challenge(self, message: str, screenshot_path: str | None) -> None:
         emit_system_event(

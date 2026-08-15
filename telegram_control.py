@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -10,7 +11,7 @@ from aiogram.types import BotCommand, Message
 
 from audience import TelegramAudience
 from config import Settings
-from health import EVENT_SITE_ERROR, EVENT_SITE_RECOVERED
+from health import EVENT_SESSION_EXPIRED, EVENT_SITE_ERROR, EVENT_SITE_RECOVERED
 from health_report import build_health_report
 from runtime_control import ParserPauseControl
 from session_recovery import SessionRecoveryManager, normalize_sms_code
@@ -67,6 +68,9 @@ def build_dispatcher(
             "/status — состояние сессии\n"
             "/health — полная диагностика сервиса\n"
             "/version — версия проекта\n"
+            "/errors — состояние уведомлений об ошибках\n"
+            "/errors_off — отключить уведомления об ошибках\n"
+            "/errors_on — включить уведомления об ошибках\n"
             "/renew — перевыпустить cookies через SMS\n"
             "/resume — продолжить после CAPTCHA/блокировки\n"
             "/cancel — отменить восстановление сессии\n\n"
@@ -133,6 +137,32 @@ def build_dispatcher(
         if not _accept_message(message, audience):
             return
         await message.answer(f"Версия парсера: {APP_VERSION}")
+
+    @router.message(Command("errors"))
+    async def errors_command(message: Message) -> None:
+        if not _accept_message(message, audience):
+            return
+        enabled = audience.error_notifications_enabled(message.chat.id)
+        await message.answer(
+            "Уведомления об ошибках: " + ("включены." if enabled else "отключены.")
+        )
+
+    @router.message(Command("errors_off"))
+    async def errors_off_command(message: Message) -> None:
+        if not _accept_message(message, audience):
+            return
+        audience.set_error_notifications(message.chat.id, enabled=False)
+        await message.answer(
+            "🔕 Уведомления об ошибках отключены для этого чата. "
+            "Заказы и ответы на команды продолжат приходить."
+        )
+
+    @router.message(Command("errors_on"))
+    async def errors_on_command(message: Message) -> None:
+        if not _accept_message(message, audience):
+            return
+        audience.set_error_notifications(message.chat.id, enabled=True)
+        await message.answer("🔔 Уведомления об ошибках включены для этого чата.")
 
     @router.message(Command("cancel"))
     async def cancel_command(message: Message) -> None:
@@ -216,6 +246,9 @@ async def telegram_command_polling(
                     BotCommand(command="status", description="состояние парсера и сессии"),
                     BotCommand(command="health", description="полная диагностика сервиса"),
                     BotCommand(command="version", description="версия проекта"),
+                    BotCommand(command="errors", description="состояние уведомлений об ошибках"),
+                    BotCommand(command="errors_off", description="отключить сообщения об ошибках"),
+                    BotCommand(command="errors_on", description="включить сообщения об ошибках"),
                     BotCommand(command="renew", description="перевыпустить cookies через SMS"),
                     BotCommand(command="cancel", description="отменить восстановление сессии"),
                     BotCommand(command="resume", description="продолжить после блокировки"),
@@ -270,7 +303,47 @@ def _format_system_event(event: dict[str, Any]) -> str | None:
         )
     if event_type == EVENT_SITE_RECOVERED:
         return f"✅ Работа Profi.ru восстановлена.\n{message}"
+    if event_type == EVENT_SESSION_EXPIRED:
+        return (
+            "🔐 Сессия Profi.ru завершена.\n"
+            f"Причина: {message}\n\n"
+            "Бот автоматически запустит восстановление через SMS."
+        )
     return None
+
+
+def _event_screenshot(settings: Settings, event: dict[str, Any]) -> Path | None:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    raw_path = details.get("screenshot_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    try:
+        path = Path(raw_path).resolve()
+        debug_dir = settings.debug_dir.resolve()
+    except OSError:
+        return None
+    if not path.is_file() or not path.is_relative_to(debug_dir):
+        return None
+    return path
+
+
+async def _deliver_system_event(
+    settings: Settings,
+    bot: Bot,
+    audience: TelegramAudience,
+    event: dict[str, Any],
+) -> int:
+    notification = _format_system_event(event)
+    if notification is None:
+        return 0
+    screenshot = _event_screenshot(settings, event)
+    if screenshot is not None:
+        return await audience.send_error_photo(
+            bot,
+            str(screenshot),
+            notification,
+        )
+    return await audience.send_error(bot, notification)
 
 
 async def system_event_notifier(
@@ -298,21 +371,27 @@ async def system_event_notifier(
                 else:
                     notification = _format_system_event(event)
                     if notification:
-                        delivered = await notify_admin(
-                            bot,
+                        delivered = await _deliver_system_event(
                             settings,
-                            notification,
+                            bot,
                             audience,
+                            event,
                         )
                         if delivered == 0:
-                            log.info("Системное уведомление ожидает получателя")
-                            await audience.wait_until_available()
-                            delivered = await notify_admin(
-                                bot,
-                                settings,
-                                notification,
-                                audience,
-                            )
+                            if audience.has_recipients and not audience.has_error_recipients:
+                                log.info(
+                                    "Системное уведомление отключено всеми получателями"
+                                )
+                                delivered = -1
+                            else:
+                                log.info("Системное уведомление ожидает получателя")
+                                await audience.wait_until_available()
+                                delivered = await _deliver_system_event(
+                                    settings,
+                                    bot,
+                                    audience,
+                                    event,
+                                )
                             if delivered == 0:
                                 break
                 offset = next_offset

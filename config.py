@@ -151,6 +151,7 @@ class Settings:
     system_events_path: Path
     system_event_cursor_path: Path
     telegram_chats_path: Path
+    telegram_error_mutes_path: Path
     heartbeat_path: Path
     site_cooldown_path: Path
     version_state_path: Path
@@ -170,7 +171,6 @@ class Settings:
     error_backoff_max_sec: int
     heartbeat_interval_sec: int
     heartbeat_stale_sec: int
-    success_stale_sec: int
     watchdog_poll_sec: int
     min_free_disk_mb: int
     trace_on_failure: bool
@@ -263,6 +263,7 @@ class Settings:
             system_events_path=data_dir / "system_events.jsonl",
             system_event_cursor_path=data_dir / "system_event_cursor.json",
             telegram_chats_path=data_dir / "telegram_chats.json",
+            telegram_error_mutes_path=data_dir / "telegram_error_mutes.json",
             heartbeat_path=data_dir / "heartbeat.json",
             site_cooldown_path=data_dir / "site_cooldown.json",
             version_state_path=data_dir / "version_state.json",
@@ -320,12 +321,6 @@ class Settings:
                 "HEARTBEAT_STALE_SEC",
                 120,
                 minimum=30,
-            ),
-            success_stale_sec=_parse_int(
-                values,
-                "SUCCESS_STALE_SEC",
-                900,
-                minimum=120,
             ),
             watchdog_poll_sec=_parse_int(
                 values,
@@ -560,6 +555,8 @@ class Settings:
             self.auth_state_path,
             self.profi_proxy_pool_path,
             self.site_cooldown_path,
+            self.telegram_chats_path,
+            self.telegram_error_mutes_path,
         ):
             if private_file.exists():
                 try:

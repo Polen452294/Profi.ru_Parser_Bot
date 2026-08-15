@@ -68,6 +68,14 @@ class OperationsTests(unittest.TestCase):
                     self.messages.append(caption)
                     return 0
 
+                async def send_error(self, bot, text):
+                    self.messages.append(text)
+                    return 0
+
+                async def send_error_photo(self, bot, path, caption):
+                    self.messages.append(caption)
+                    return 0
+
             class FakeLog:
                 def warning(self, *args):
                     pass

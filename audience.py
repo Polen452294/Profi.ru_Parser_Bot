@@ -28,6 +28,9 @@ class TelegramAudience:
             if self.open_mode
             else {settings.admin_chat_id}
         )
+        self._error_muted_chat_ids = load_chat_ids(
+            settings.telegram_error_mutes_path
+        )
         self._available = asyncio.Event()
         if self._chat_ids:
             self._available.set()
@@ -39,6 +42,33 @@ class TelegramAudience:
     @property
     def has_recipients(self) -> bool:
         return bool(self._chat_ids)
+
+    @property
+    def error_recipients(self) -> tuple[int, ...]:
+        return tuple(
+            chat_id
+            for chat_id in self.recipients
+            if chat_id not in self._error_muted_chat_ids
+        )
+
+    @property
+    def has_error_recipients(self) -> bool:
+        return bool(self.error_recipients)
+
+    def error_notifications_enabled(self, chat_id: int) -> bool:
+        return chat_id not in self._error_muted_chat_ids
+
+    def set_error_notifications(self, chat_id: int, *, enabled: bool) -> bool:
+        was_enabled = self.error_notifications_enabled(chat_id)
+        if enabled:
+            self._error_muted_chat_ids.discard(chat_id)
+        else:
+            self._error_muted_chat_ids.add(chat_id)
+        save_chat_ids(
+            self.settings.telegram_error_mutes_path,
+            self._error_muted_chat_ids,
+        )
+        return was_enabled != enabled
 
     def is_allowed(self, chat_id: int, chat_type: ChatType | str) -> bool:
         if not self.open_mode:
@@ -57,7 +87,12 @@ class TelegramAudience:
         if not self.open_mode or chat_id not in self._chat_ids:
             return
         self._chat_ids.remove(chat_id)
+        self._error_muted_chat_ids.discard(chat_id)
         save_chat_ids(self.settings.telegram_chats_path, self._chat_ids)
+        save_chat_ids(
+            self.settings.telegram_error_mutes_path,
+            self._error_muted_chat_ids,
+        )
         if not self._chat_ids:
             self._available.clear()
 
@@ -65,8 +100,20 @@ class TelegramAudience:
         await self._available.wait()
 
     async def send(self, bot: Bot, text: str, **kwargs: Any) -> int:
+        return await self._send_to(bot, self.recipients, text, **kwargs)
+
+    async def send_error(self, bot: Bot, text: str, **kwargs: Any) -> int:
+        return await self._send_to(bot, self.error_recipients, text, **kwargs)
+
+    async def _send_to(
+        self,
+        bot: Bot,
+        recipients: tuple[int, ...],
+        text: str,
+        **kwargs: Any,
+    ) -> int:
         delivered = 0
-        for chat_id in self.recipients:
+        for chat_id in recipients:
             try:
                 await bot.send_message(chat_id, text, **kwargs)
                 delivered += 1
@@ -90,13 +137,31 @@ class TelegramAudience:
         return delivered
 
     async def send_photo(self, bot: Bot, path: str, caption: str) -> int:
+        return await self._send_photo_to(bot, self.recipients, path, caption)
+
+    async def send_error_photo(self, bot: Bot, path: str, caption: str) -> int:
+        return await self._send_photo_to(
+            bot,
+            self.error_recipients,
+            path,
+            caption,
+        )
+
+    async def _send_photo_to(
+        self,
+        bot: Bot,
+        recipients: tuple[int, ...],
+        path: str,
+        caption: str,
+    ) -> int:
+        safe_caption = caption if len(caption) <= 1024 else caption[:1021] + "..."
         delivered = 0
-        for chat_id in self.recipients:
+        for chat_id in recipients:
             try:
                 await bot.send_photo(
                     chat_id,
                     FSInputFile(path),
-                    caption=caption,
+                    caption=safe_caption,
                 )
                 delivered += 1
             except TelegramForbiddenError:

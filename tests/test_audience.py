@@ -14,9 +14,13 @@ from config import Settings
 class FakeBot:
     def __init__(self):
         self.messages = []
+        self.photos = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text, kwargs))
+
+    async def send_photo(self, chat_id, photo, caption):
+        self.photos.append((chat_id, photo, caption))
 
 
 class FakeLog:
@@ -118,6 +122,39 @@ class AudienceTests(unittest.TestCase):
 
             self.assertEqual(delivered, 0)
             self.assertTrue(log.warnings)
+
+        asyncio.run(scenario())
+
+    def test_error_notifications_can_be_muted_per_chat_and_persisted(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                settings = Settings.load(
+                    env_file=None,
+                    values={
+                        "DATA_DIR": directory,
+                        "BOT_TOKEN": "123:abc",
+                        "PROFI_LOGIN": "+79990000000",
+                    },
+                )
+                audience = TelegramAudience(settings)
+                audience.register(42)
+                audience.register(99)
+                audience.set_error_notifications(42, enabled=False)
+                bot = FakeBot()
+
+                self.assertFalse(audience.error_notifications_enabled(42))
+                self.assertTrue(audience.error_notifications_enabled(99))
+                self.assertEqual(await audience.send(bot, "order"), 2)
+                self.assertEqual(await audience.send_error(bot, "error"), 1)
+                self.assertEqual(
+                    [chat_id for chat_id, text, _ in bot.messages if text == "error"],
+                    [99],
+                )
+
+                restored = TelegramAudience(settings)
+                self.assertFalse(restored.error_notifications_enabled(42))
+                restored.set_error_notifications(42, enabled=True)
+                self.assertEqual(await restored.send_error(bot, "restored"), 2)
 
         asyncio.run(scenario())
 

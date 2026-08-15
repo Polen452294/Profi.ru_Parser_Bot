@@ -32,7 +32,6 @@ async def heartbeat_watchdog(
     parser_pid: Callable[[], int | None],
 ) -> None:
     heartbeat_alert = False
-    success_alert = False
     disk_alert = False
     observed_pid: int | None = None
     observed_pid_at = time.monotonic()
@@ -43,7 +42,7 @@ async def heartbeat_watchdog(
             free_mb = disk.free // (1024 * 1024)
             disk_low = free_mb < settings.min_free_disk_mb
             if disk_low and not disk_alert:
-                delivered = await audience.send(
+                delivered = await audience.send_error(
                     bot,
                     "⚠️ На сервере заканчивается место.\n"
                     f"Свободно: {free_mb} МБ; требуется не менее "
@@ -51,7 +50,10 @@ async def heartbeat_watchdog(
                 )
                 disk_alert = delivered > 0
             elif not disk_low and disk_alert:
-                await audience.send(bot, "✅ Свободное место на сервере восстановлено.")
+                await audience.send_error(
+                    bot,
+                    "✅ Свободное место на сервере восстановлено.",
+                )
                 disk_alert = False
 
             current_pid = parser_pid()
@@ -75,43 +77,23 @@ async def heartbeat_watchdog(
                     await asyncio.sleep(settings.watchdog_poll_sec)
                     continue
                 alive_age = _age_seconds(heartbeat.get("process_alive_at"))
-                success_reference = heartbeat.get("last_success_at") or heartbeat.get(
-                    "process_started_at"
-                )
-                success_age = _age_seconds(success_reference)
-
                 heartbeat_stale = (
                     alive_age is None or alive_age > settings.heartbeat_stale_sec
                 )
-                success_stale = (
-                    success_age is None or success_age > settings.success_stale_sec
-                )
 
                 if heartbeat_stale and not heartbeat_alert:
-                    delivered = await audience.send(
+                    delivered = await audience.send_error(
                         bot,
                         "🚨 Парсер запущен, но heartbeat перестал обновляться. "
                         "Возможное зависание процесса.",
                     )
                     heartbeat_alert = delivered > 0
                 elif not heartbeat_stale and heartbeat_alert:
-                    await audience.send(bot, "✅ Heartbeat парсера восстановлен.")
+                    await audience.send_error(
+                        bot,
+                        "✅ Heartbeat парсера восстановлен.",
+                    )
                     heartbeat_alert = False
-
-                if success_stale and not success_alert:
-                    minutes = settings.success_stale_sec // 60
-                    delivered = await audience.send(
-                        bot,
-                        "⚠️ Парсер работает, но страница заказов Profi.ru не была "
-                        f"успешно проверена более {minutes} мин.",
-                    )
-                    success_alert = delivered > 0
-                elif not success_stale and success_alert:
-                    await audience.send(
-                        bot,
-                        "✅ Успешная проверка страницы заказов возобновилась.",
-                    )
-                    success_alert = False
 
             await asyncio.sleep(settings.watchdog_poll_sec)
         except asyncio.CancelledError:
